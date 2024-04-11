@@ -7,6 +7,8 @@ import subprocess
 import sys
 from tempfile import TemporaryDirectory
 
+from tqdm import tqdm
+
 BLOCKAID_DIR = "/home/ubuntu/dse/blockaid"
 BLOCKAID_CMD_LINE = (
     'mvn', 'exec:java', '-Dexec.mainClass="edu.berkeley.cs.netsys.privacy_proxy.cmdline.CheckQuery"',
@@ -24,12 +26,6 @@ class Config:
     password: str
 
     def make_blockaid_cmdline(self) -> str:
-        # return [
-        #     'mvn', 'exec:java', '-Dexec.mainClass="edu.berkeley.cs.netsys.privacy_proxy.cmdline.CheckQuery"',
-        #     f'-Dexec.args="jdbc:privacy:thin:{self.policy_dir},{self.jdbc_url},{self.database} {self.username} {self.password}"',
-        #     '-Dblockaid.enable_caching=false', '-Dblockaid.fast_non_compliance_check=true',
-        #     '-Dblockaid.solve_timeout_ms=2000'
-        # ]
         return (f'mvn exec:java '
                 f'-Dexec.mainClass="edu.berkeley.cs.netsys.privacy_proxy.cmdline.CheckQuery" '
                 f'-Dexec.args="jdbc:privacy:thin:{self.policy_dir},{self.jdbc_url},{self.database} {self.username} {self.password}" '
@@ -48,12 +44,12 @@ def is_query_compliant(config: Config, views: list[str], query: str) -> bool:
                              username=config.username, password=config.password)
         result = subprocess.run(temp_config.make_blockaid_cmdline(), cwd=BLOCKAID_DIR, shell=True, input=query + "\n",
                                 capture_output=True, text=True)
-        print(result.stdout, file=sys.stderr)
-        print(result.stderr, file=sys.stderr)
 
         if result.returncode != 0:
             print(f"*** Blockaid failed with return code {result.returncode}.", file=sys.stderr)
-            sys.exit(1)
+            print(result.stdout, file=sys.stderr)
+            print(result.stderr, file=sys.stderr)
+            return False
 
         if "Query is compliant" in result.stdout:
             return True
@@ -61,7 +57,9 @@ def is_query_compliant(config: Config, views: list[str], query: str) -> bool:
             return False
         else:
             print("*** Unexpected output from Blockaid:", file=sys.stderr)
-            sys.exit(1)
+            print(result.stdout, file=sys.stderr)
+            print(result.stderr, file=sys.stderr)
+            return False
 
 
 def compute_num_tables(query: str) -> int:
@@ -73,15 +71,15 @@ def compute_num_tables(query: str) -> int:
 
 
 def remove_subsumed(config: Config, sqls: list[str]) -> list[str]:
-    sqls = sorted(sqls, key=compute_num_tables, reverse=True)
-    while True:
-        for (i, query) in enumerate(sqls):
-            remaining_views = sqls[:i] + sqls[i + 1:]
-            if is_query_compliant(config, remaining_views, query):
-                del sqls[i]
-                break
-        else:  # No query was removed in this iteration; we are done.
-            break
+    sqls = sorted(sqls, key=compute_num_tables, reverse=True)  # Makes a copy.
+    i = 0
+    with tqdm(total=len(sqls), desc="Removing subsumed queries") as pbar:
+        while i < len(sqls):
+            if is_query_compliant(config, sqls[:i] + sqls[i + 1:], sqls[i]):
+                del sqls[i]  # Query i is redundant -- the information it reveals is already in the other queries.
+            else:
+                i += 1  # We never consider the same query again -- it won't become redundant later.
+            pbar.update(1)
     return sqls
 
 
