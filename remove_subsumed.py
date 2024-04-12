@@ -10,12 +10,6 @@ from tempfile import TemporaryDirectory
 from tqdm import tqdm
 
 BLOCKAID_DIR = "/home/ubuntu/dse/blockaid"
-BLOCKAID_CMD_LINE = (
-    'mvn', 'exec:java', '-Dexec.mainClass="edu.berkeley.cs.netsys.privacy_proxy.cmdline.CheckQuery"',
-    '-Dexec.args="jdbc:privacy:thin:/home/ubuntu/dse/diaspora/policy,jdbc:mysql://localhost:3306/diaspora_test?allowPublicKeyRetrieval=true&useSSL=false,diaspora_test diaspora 12345678"',
-    '-Dblockaid.enable_caching=false', '-Dblockaid.fast_non_compliance_check=true', '-Dblockaid.solve_timeout_ms=15000'
-)
-
 
 @dataclass
 class Config:
@@ -29,8 +23,9 @@ class Config:
         return (f'mvn exec:java '
                 f'-Dexec.mainClass="edu.berkeley.cs.netsys.privacy_proxy.cmdline.CheckQuery" '
                 f'-Dexec.args="jdbc:privacy:thin:{self.policy_dir},{self.jdbc_url},{self.database} {self.username} {self.password}" '
-                f'-Dblockaid.enable_caching=false -Dblockaid.fast_non_compliance_check=true '
-                f'-Dblockaid.solve_timeout_ms=2000')
+                '-Dblockaid.enable_caching=false '
+                '-Dblockaid.fast_non_compliance_check=true '
+                '-Dblockaid.solve_timeout_ms=15000')
 
 
 def is_query_compliant(config: Config, views: list[str], query: str) -> bool:
@@ -70,17 +65,20 @@ def compute_num_tables(query: str) -> int:
         return len(match.group(1).split(","))
 
 
-def remove_subsumed(config: Config, sqls: list[str]) -> list[str]:
+def remove_subsumed_and_print(config: Config, sqls: list[str]) -> None:
     sqls = sorted(sqls, key=compute_num_tables, reverse=True)  # Makes a copy.
     i = 0
     with tqdm(total=len(sqls), desc="Removing subsumed queries") as pbar:
         while i < len(sqls):
-            if is_query_compliant(config, sqls[:i] + sqls[i + 1:], sqls[i]):
+            curr = sqls[i]
+            if is_query_compliant(config, sqls[:i] + sqls[i + 1:], curr):
+                print(f"Removed redundant:\t{curr}", file=sys.stderr)
                 del sqls[i]  # Query i is redundant -- the information it reveals is already in the other queries.
             else:
+                print(curr + ";")
+                print(flush=True)
                 i += 1  # We never consider the same query again -- it won't become redundant later.
             pbar.update(1)
-    return sqls
 
 
 def main() -> None:
@@ -91,14 +89,12 @@ def main() -> None:
     config = Config(policy_dir=sys.argv[1],  # We will use the dependencies stored here, but not the views.
                     jdbc_url=sys.argv[2], database=sys.argv[3], username=sys.argv[4], password=sys.argv[5])
 
-    all_content = sys.stdin.read()
-    sqls = [s.replace("\n", " ").strip()  # Make sure each query is on one line.
-            for s in all_content.split(";")]
-
-    for s in remove_subsumed(config, sqls):
-        print(s + ";")
-        print()
+    sqls = sys.stdin.read().split(";")
+    sqls = [s.replace("\n", " ").strip() for s in sqls]  # Make sure each query is on one line.
+    sqls = [s for s in sqls if s]  # Remove empty strings.
+    remove_subsumed_and_print(config, sqls)
 
 
 if __name__ == '__main__':
     main()
+
