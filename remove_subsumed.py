@@ -24,8 +24,8 @@ class Config:
                 f'-Dexec.mainClass="edu.berkeley.cs.netsys.privacy_proxy.cmdline.CheckQuery" '
                 f'-Dexec.args="jdbc:privacy:thin:{self.policy_dir},{self.jdbc_url},{self.database} {self.username} {self.password}" '
                 '-Dblockaid.enable_caching=false '
-                '-Dblockaid.fast_non_compliance_check=true '
-                '-Dblockaid.solve_timeout_ms=15000')
+                # '-Dblockaid.fast_non_compliance_check=true '
+                '-Dblockaid.solve_timeout_ms=5000')
 
 
 def is_query_compliant(config: Config, views: list[str], query: str) -> bool:
