@@ -7,7 +7,7 @@ cd "$HOME/dse"
 (cd examples; git pull --ff-only)
 
 config_file="$HOME/dse/examples/diaspora_posts_show.conf"
-for p in $HOME/dse/logs/diaspora-*-$suffix; do
+for p in $HOME/dse/logs/diaspora-*$suffix; do
     START=$(date +%s.%N)
 
     paths_dir="$(realpath "$p/annotated-paths")"
@@ -21,7 +21,7 @@ for p in $HOME/dse/logs/diaspora-*-$suffix; do
         cat original-conditioned-queries.json | \
             $HOME/dse/scripts/analyze-diaspora/broaden-people-show.py |
             $HOME/dse/scripts/analyze-diaspora/tighten-people-stream.py |
-            $HOME/dse/scripts/analyze-diaspora/rewrite-aggs.sh |
+            $HOME/dse/scripts/analyze-diaspora/rewrite-aggs.py |
             $HOME/dse/scripts/analyze-diaspora/rewrite-left-outer-joins.sh > conditioned-queries.json
     )
 

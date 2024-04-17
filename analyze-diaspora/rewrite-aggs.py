@@ -7,6 +7,8 @@ from typing import Optional
 REWRITES = [
     ("SELECT COUNT(*) FROM `notifications` WHERE `notifications`.`recipient_id` = ? AND `notifications`.`unread` = ?",
      "SELECT `notifications`.`id` FROM `notifications` WHERE `notifications`.`recipient_id` = ? AND `notifications`.`unread` = ?"),
+    ("SELECT COUNT(*) FROM `notifications` WHERE `notifications`.`recipient_id` = ?",
+     "SELECT `notifications`.`id` FROM `notifications` WHERE `notifications`.`recipient_id` = ?"),
     ("SELECT COUNT(*) FROM `photos` WHERE `photos`.`author_id` = ? AND `photos`.`created_at` < ? AND `photos`.`pending` = ?",
      "SELECT `photos`.`id` FROM `photos` WHERE `photos`.`author_id` = ? AND `photos`.`created_at` < ? AND `photos`.`pending` = ?"),
     ("SELECT COUNT(*) FROM `contacts` WHERE `contacts`.`user_id` = ? AND `contacts`.`receiving` = ?",
@@ -18,7 +20,9 @@ REWRITES = [
     ("SELECT SUM(`conversation_visibilities`.`unread`) FROM `conversation_visibilities` WHERE `conversation_visibilities`.`person_id` = ?",
      "SELECT `conversation_visibilities`.`id`, `conversation_visibilities`.`unread` FROM `conversation_visibilities` WHERE `conversation_visibilities`.`person_id` = ?"),
     ("SELECT SUM(`poll_answers`.`vote_count`) FROM `poll_answers` WHERE `poll_answers`.`poll_id` = ?",
-     "SELECT `poll_answers`.`id`, `poll_answers`.`vote_count` FROM `poll_answers` WHERE `poll_answers`.`poll_id` = ?")
+     "SELECT `poll_answers`.`id`, `poll_answers`.`vote_count` FROM `poll_answers` WHERE `poll_answers`.`poll_id` = ?"),
+    ("SELECT COUNT(*) FROM `people` INNER JOIN `conversation_visibilities` ON `people`.`id` = `conversation_visibilities`.`person_id` WHERE `conversation_visibilities`.`conversation_id` = ?",
+     "SELECT `people`.`id` FROM `people` INNER JOIN `conversation_visibilities` ON `people`.`id` = `conversation_visibilities`.`person_id` WHERE `conversation_visibilities`.`conversation_id` = ?"),
 ]
 
 
