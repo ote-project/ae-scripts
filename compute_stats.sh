@@ -54,3 +54,13 @@ printf "CQs:\t%d -> %d\n" "$num_cqs_start" "$num_cqs_end"
 post_processing_dur_s="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/post-processing-time-sec.txt")"
 printf "Per-handler view-generation time:\t"
 displaytime "${post_processing_dur_s%.*}"
+echo
+
+num_views="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/views.sql" | grep '^SELECT' | wc -l)"
+printf "Num views:\t%d\n" "$num_views"
+num_minimized_views="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/views-minimized.sql" | grep '^SELECT' | wc -l)"
+printf "Num minimized views:\t%d\n" "$num_minimized_views"
+remove_subsumed_dur_s="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/remove-subsumed-time-sec.txt")"
+printf "Per-handler remove-subsumed time:\t"
+displaytime "${remove_subsumed_dur_s%.*}"
+
