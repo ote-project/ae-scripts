@@ -1,7 +1,7 @@
 require 'set'
 
 class Constraint
-  attr_accessor :table :column :type
+  attr_accessor :table, :column, :type
 
   def initialize(tbl, col, tp)
     @table = tbl
@@ -72,7 +72,7 @@ class PresenceConstraint < Constraint
 end
 
 class LengthConstraint < Constraint
-  attr_accessor :min :max # integers
+  attr_accessor :min, :max # integers
 
   def initialize(table, column, minimum, maximum)
     super(table, column, "length")
@@ -115,7 +115,7 @@ end
 
 class NumericalityConstraint < Constraint
   # TODO need to add more stuff see https://guides.rubyonrails.org/active_record_validations.html#numericality
-  attr_accessor :cond :only_integer # booleans
+  attr_accessor :cond, :only_integer # booleans
 
   def initialize(table, column, condition, oi)
     super(table, column, "numericality")
@@ -137,7 +137,7 @@ class NumericalityConstraint < Constraint
 end
 
 class ForeignKeyConstraint < Constraint
-  attr_accesssor :fk_table :fk_column # strings
+  attr_accessor :fk_table, :fk_column # strings
 
   def initialize(table, column, fktable, fkcolumn)
     super(table, column, "foreignkey")
