@@ -8,6 +8,10 @@ class Constraint
     @column = col
     @type = tp
   end
+
+  def to_s
+    return "{ type = \"#{@type}\", tbl = \"#{@table}\", col = \"#{@column}\""
+  end
 end
 
 class NonNullConstraint < Constraint
@@ -27,6 +31,10 @@ class NonNullConstraint < Constraint
 
   def hash
     return (self.table + self.column + self.type + self.cond.to_s).hash
+  end
+
+  def to_s
+    return super + " }"
   end
 end
 
@@ -110,6 +118,10 @@ class LengthConstraint < Constraint
 
   def hash
     return (self.table + self.column + self.type + self.min.to_s + self.max.to_s).hash
+  end
+
+  def to_s
+    return super + ", min = #{@min}, max = #{@max} }"
   end
 end
 
