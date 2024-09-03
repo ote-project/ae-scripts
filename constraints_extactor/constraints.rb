@@ -10,6 +10,26 @@ class Constraint
   end
 end
 
+class NonNullConstraint < Constraint
+  attr_accessor :cond # bool
+
+  def initialize(table, column, c)
+    super(table, column, "non-null")
+    self.cond = c
+  end
+
+  def eql?(other)
+    return false if other.class != self.class
+    self.table == other.table &&
+    self.column == other.column &&
+    self.cond == other.cond
+  end
+
+  def hash
+    return (self.table + self.column + self.type + self.cond.to_s).hash
+  end
+end
+
 class InclusionConstraint < Constraint
   attr_accessor :values # list of strings
 
