@@ -39,8 +39,15 @@ module ActiveRecord
       def method_missing(method_name, *args, &block)
         if @current_table
           column_name = args.shift
-          args.map! do |arg|
-            puts arg.keys
+          args.each do |h|
+            h.each do |(key, value)|
+              case key
+              when :null
+                @tables[@current_table][:constraints] << NonNullConstraint.new(@current_table.to_s, column_name.to_s, value)
+              when :limit
+                @tables[@current_table][:constraints] << LengthConstraint.new(@current_table.to_s, column_name.to_s, nil, value)
+              end
+            end
           end
           @tables[@current_table][:columns][column_name.to_sym] = { type: method_name, options: args.first || {} }
         end
@@ -62,4 +69,3 @@ class SchemaParser
     instance_eval(content)
   end
 end
-
