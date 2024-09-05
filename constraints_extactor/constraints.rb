@@ -56,6 +56,10 @@ class InclusionConstraint < Constraint
   def hash
     return (self.table + self.column + self.type + self.vals.to_s).hash
   end
+
+  def to_s
+    return super + ", value = #{@values} } \# Guessed"
+  end
 end
 
 class UniqueConstraint < Constraint

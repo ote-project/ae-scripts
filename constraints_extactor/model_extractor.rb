@@ -51,14 +51,13 @@ class ModelParser
 
   def parse_command(node)
     if node.length != 3
-      puts "got command with note 3 elements"
-      pp node
       exit
     end
 
     sym = node[0]
     type = node[1]
     com_args = node[2]
+
     if type.include?("validates") and com_args.is_a?(Array)
       parse_validates(com_args)
     end
@@ -98,9 +97,22 @@ class ModelParser
         value = item[1][1] # don't need a function for this
       elsif item.include?(:@label)
         ident = item[1]
+      elsif item.include?(:hash)
+        value = parse_hash(item)
       end
     end
     return ident.to_s, value.to_s
+  end
+
+  def parse_hash(hash)
+    h = {}
+    assoclist = hash[1][1]
+    assoclist.each do |item|
+      item.shift
+      key, value = parse_assoc_new(item) # FIXME
+      h[key] = value
+    end
+    return h
   end
 
   def get_sym(sym_lit)
@@ -120,9 +132,6 @@ class ModelParser
       pp sym_lit
       exit
     end
-  end
-
-  def get_label(label)
   end
 
 end
