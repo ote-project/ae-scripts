@@ -1,33 +1,35 @@
 require_relative 'schema_extractor'
 require_relative 'model_extractor'
 
+out = File.open("constraints", 'a')
+
 sparser = SchemaParser.new
 schema = sparser.parse('/home/ubuntu/dse/diaspora/db/schema.rb')
 
 # Print out the parsed schema
 schema.each do |table_name, table_info|
-puts "Table: #{table_name}"
-  puts "Columns:"
+#puts "Table: #{table_name}"
+#  puts "Columns:"
   table_info[:columns].each do |column_name, column_info|
-    puts "  #{column_name}: #{column_info[:type]} #{column_info[:options]}"
+#    puts "  #{column_name}: #{column_info[:type]} #{column_info[:options]}"
   end
-  puts "Indices:"
+#  puts "Indices:"
   table_info[:indices].each do |index|
-    puts "  #{index[:columns]} #{index[:options]}"
+#    puts "  #{index[:columns]} #{index[:options]}"
   end
-  puts "Foreign Keys:"
+#  puts "Foreign Keys:"
   table_info[:foreign_keys].each do |fk|
-    puts "  to #{fk[:to_table]} #{fk[:options]}"
+#    puts "  to #{fk[:to_table]} #{fk[:options]}"
   end
-  puts "Constraints: "
+#  puts "Constraints: "
   table_info[:constraints].each do |c|
-    puts "   #{c}"
+    out.puts c.to_s
   end
-  puts "\n"
+#  puts "\n"
 end
 
 mparser = ModelParser.new("user")
 model = mparser.parse('/home/ubuntu/dse/diaspora/app/models/user.rb')
 model.each do |c|
-  puts c
+  out.puts c.to_s
 end
