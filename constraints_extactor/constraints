@@ -1,0 +1,57 @@
+
+{ type = "length", tbl = "profiles", col = "first_name", min = , max = 127 }
+{ type = "length", tbl = "profiles", col = "last_name", min = , max = 127 }
+{ type = "non-null", tbl = "profiles", col = "searchable" }
+{ type = "non-null", tbl = "profiles", col = "person_id" }
+{ type = "non-null", tbl = "profiles", col = "created_at" }
+{ type = "non-null", tbl = "profiles", col = "updated_at" }
+{ type = "length", tbl = "profiles", col = "full_name", min = , max = 70 }
+{ type = "non-null", tbl = "references", col = "source_id" }
+{ type = "length", tbl = "references", col = "source_type", min = , max = 60 }
+{ type = "non-null", tbl = "references", col = "source_type" }
+{ type = "non-null", tbl = "references", col = "target_id" }
+{ type = "length", tbl = "references", col = "target_type", min = , max = 60 }
+{ type = "non-null", tbl = "references", col = "target_type" }
+{ type = "non-null", tbl = "reports", col = "item_id" }
+{ type = "non-null", tbl = "reports", col = "item_type" }
+{ type = "non-null", tbl = "reports", col = "user_id" }
+{ type = "non-null", tbl = "roles", col = "created_at" }
+{ type = "non-null", tbl = "roles", col = "updated_at" }
+{ type = "length", tbl = "services", col = "type", min = , max = 127 }
+{ type = "non-null", tbl = "services", col = "type" }
+{ type = "non-null", tbl = "services", col = "user_id" }
+{ type = "length", tbl = "services", col = "uid", min = , max = 127 }
+{ type = "non-null", tbl = "services", col = "created_at" }
+{ type = "non-null", tbl = "services", col = "updated_at" }
+{ type = "non-null", tbl = "share_visibilities", col = "shareable_id" }
+{ type = "non-null", tbl = "share_visibilities", col = "hidden" }
+{ type = "length", tbl = "share_visibilities", col = "shareable_type", min = , max = 60 }
+{ type = "non-null", tbl = "share_visibilities", col = "shareable_type" }
+{ type = "non-null", tbl = "share_visibilities", col = "user_id" }
+{ type = "non-null", tbl = "signature_orders", col = "order" }
+{ type = "length", tbl = "simple_captcha_data", col = "key", min = , max = 40 }
+{ type = "length", tbl = "simple_captcha_data", col = "value", min = , max = 12 }
+{ type = "non-null", tbl = "tag_followings", col = "tag_id" }
+{ type = "non-null", tbl = "tag_followings", col = "user_id" }
+{ type = "non-null", tbl = "tag_followings", col = "created_at" }
+{ type = "non-null", tbl = "tag_followings", col = "updated_at" }
+{ type = "length", tbl = "taggings", col = "taggable_type", min = , max = 127 }
+{ type = "length", tbl = "taggings", col = "tagger_type", min = , max = 127 }
+{ type = "length", tbl = "taggings", col = "context", min = , max = 127 }
+{ type = "non-null", tbl = "user_preferences", col = "created_at" }
+{ type = "non-null", tbl = "user_preferences", col = "updated_at" }
+{ type = "non-null", tbl = "users", col = "username" }
+{ type = "non-null", tbl = "users", col = "getting_started" }
+{ type = "non-null", tbl = "users", col = "disable_mail" }
+{ type = "non-null", tbl = "users", col = "email" }
+{ type = "non-null", tbl = "users", col = "encrypted_password" }
+{ type = "non-null", tbl = "users", col = "created_at" }
+{ type = "non-null", tbl = "users", col = "updated_at" }
+{ type = "length", tbl = "users", col = "authentication_token", min = , max = 30 }
+{ type = "length", tbl = "users", col = "confirm_email_token", min = , max = 30 }
+{ type = "non-null", tbl = "users", col = "show_community_spotlight_in_stream" }
+{ type = "non-null", tbl = "user", col = "username" }
+{ type = "unique", tbl = "user", col = "username"
+{ type = "inclusion", tbl = "user", col = "color_theme", value: {"in:"=>"AVAILABLE_COLOR_THEMES"} } # Guessed
+{ type = "non-null", tbl = "user", col = "color_theme" }
+{ type = "non-null", tbl = "user", col = "person" }
