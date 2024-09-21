@@ -54,7 +54,7 @@ def is_query_compliant(config: Config, views: list[str], query: str) -> bool:
             print("*** Unexpected output from Blockaid:", file=sys.stderr)
             print(result.stdout, file=sys.stderr)
             print(result.stderr, file=sys.stderr)
-            return False
+            sys.exit(1)
 
 
 def compute_num_tables(query: str) -> int:
