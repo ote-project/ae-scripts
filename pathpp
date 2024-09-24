@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+
+TEMPFILE="$(mktemp --suffix=.json)"
+cp /dev/stdin "$TEMPFILE"
+trap '{ rm -f -- "$TEMPFILE"; }' EXIT
+
+cd $HOME/dse/concolic_driver
+sbt "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.PrettyPrint $TEMPFILE"
