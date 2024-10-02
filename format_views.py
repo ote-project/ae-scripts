@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+"""
+Reads from stdin SQL queries separated by semicolon, and prints them to stdout one per line (keeping the semicolons).
+"""
 import sys
 
 
@@ -13,4 +16,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
