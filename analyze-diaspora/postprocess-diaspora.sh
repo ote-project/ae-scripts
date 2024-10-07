@@ -25,7 +25,7 @@ for p in $HOME/dse/logs/diaspora-*$suffix; do
             $HOME/dse/scripts/analyze-diaspora/rewrite-left-outer-joins.sh > conditioned-queries.json
     )
 
-    (cd $HOME/dse/concolic_driver; sbt -mem 102400 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ConvertToSqlViews $config_file $paths_dir" >/dev/null)
+    (cd $HOME/dse/concolic_driver; sbt -mem 102400 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ConvertToSqlViews $config_file $paths_dir")
 
     END=$(date +%s.%N)
     DIFF=$(echo "$END - $START" | bc)
