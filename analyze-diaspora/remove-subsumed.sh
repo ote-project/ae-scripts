@@ -23,6 +23,7 @@ START=$(date +%s.%N)
 cat $HOME/dse/logs/diaspora-*$suffix/annotated-paths/views-minimized.sql | \
     $HOME/dse/scripts/filter_unsupported_views.sh | \
     remove_subsumed >"$policy_dir/all-minimized.sql"
+"$HOME/dse/scripts/pretty_print_views.py" <"$policy_dir/all-minimized.sql" >"$policy_dir/all-minimized-pretty.sql"
 END=$(date +%s.%N)
 DIFF=$(echo "$END - $START" | bc)
 echo "$DIFF" > "$policy_dir/remove-subsumed-time-sec.txt"
