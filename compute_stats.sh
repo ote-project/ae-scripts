@@ -42,24 +42,25 @@ printf "Run dir:\t%s\n" "$(basename "$gcloud_path")"
 
 printf "Num paths:\t%d\n" "$num_paths"
 
-printf "Exploration time:\t"
-displaytime "$exploration_dur_s"
-echo
-
 gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/generate-cqs.log" > ./generate-cqs.log
 num_cqs_start="$(sed -n 's/.*Converted to \([0-9]\+\) conditioned queries\..*/\1/p' ./generate-cqs.log | tail -1)"
 num_cqs_end="$(sed -n 's/.*There are \([0-9]\+\) conditioned queries after removing subsumed\..*/\1/p' ./generate-cqs.log | tail -1)"
 printf "CQs:\t%d -> %d\n" "$num_cqs_start" "$num_cqs_end"
+
+num_views="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/views.sql" | grep -c '^SELECT')"
+printf "(Num views:\t%d)\n" "$num_views"
+num_minimized_views="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/views-minimized.sql" | grep -c '^SELECT')"
+printf "Num minimized views:\t%d\n" "$num_minimized_views"
+
+printf "Exploration time:\t"
+displaytime "$exploration_dur_s"
+echo
 
 post_processing_dur_s="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/post-processing-time-sec.txt")"
 printf "Per-handler view-generation time:\t"
 displaytime "${post_processing_dur_s%.*}"
 echo
 
-num_views="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/views.sql" | grep '^SELECT' | wc -l)"
-printf "Num views:\t%d\n" "$num_views"
-num_minimized_views="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/views-minimized.sql" | grep '^SELECT' | wc -l)"
-printf "Num minimized views:\t%d\n" "$num_minimized_views"
 remove_subsumed_dur_s="$(gcloud --quiet storage cat "gs://$gcloud_path/annotated-paths/remove-subsumed-time-sec.txt")"
 printf "Per-handler remove-subsumed time:\t"
 displaytime "${remove_subsumed_dur_s%.*}"
