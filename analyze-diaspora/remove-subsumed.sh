@@ -3,10 +3,8 @@ set -ex
 
 suffix=${1?param missing - suffix.}
 
-
-remove_subsumed() {
-    "$HOME/dse/scripts/remove_subsumed.py" "$HOME/dse/app-policies-amended/diaspora" "jdbc:mysql://localhost:3306/diaspora_test?allowPublicKeyRetrieval=true&useSSL=false" "diaspora_test" "diaspora" "12345678"
-}
+SCRIPT_DIR=$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )
+. "$SCRIPT_DIR/helper.sh"
 
 for d in $HOME/dse/logs/diaspora-*$suffix; do
     START=$(date +%s.%N)
