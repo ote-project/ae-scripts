@@ -19,6 +19,7 @@ for p in $HOME/dse/logs/autolab-*-$suffix; do
             mv conditioned-queries.json original-conditioned-queries.json; 
         fi;
         cat original-conditioned-queries.json | \
+            $HOME/dse/scripts/analyze-autolab/rewrite-aggs.py | \
             $HOME/dse/scripts/analyze-autolab/broaden.sh > conditioned-queries.json
     )
 
