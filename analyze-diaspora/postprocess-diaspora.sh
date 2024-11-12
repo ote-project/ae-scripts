@@ -12,7 +12,7 @@ for p in $HOME/dse/logs/diaspora-*$suffix; do
 
     paths_dir="$(realpath "$p/annotated-paths")"
     rm -f $paths_dir/original-conditioned-queries.json
-    (cd $HOME/dse/concolic_driver; sbt -mem 102400 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.GenerateConditionedQueries $config_file $paths_dir")
+    (cd $HOME/dse/concolic_driver; sbt -mem 131072 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.GenerateConditionedQueries $config_file $paths_dir")
 
     (cd $paths_dir;
         if [ ! -f original-conditioned-queries.json ]; then
