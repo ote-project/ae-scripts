@@ -191,6 +191,31 @@ namespace :constraints do
         end
       end
     end
+    puts
+
+    puts '// Inclusion.'
+    models.each do |model|
+      table_name = model.table_name
+      model.validators.select { |v| v.is_a?(ActiveModel::Validations::InclusionValidator) }.each do |inc_v|
+        options = inc_v.options.dup
+        allow_nil = options.delete(:allow_nil)
+        allowed_values = options.delete(:in) || options.delete(:within)
+        options.delete(:within)
+        options.delete(:message)
+
+        next unless options.empty?
+        next unless allowed_values.is_a?(Array)
+        next unless allowed_values.all? { |v| v.is_a?(String) }
+
+        inc_v.attributes.each do |attr|
+          column = model.columns_hash[attr.to_s]
+          next unless column
+
+          puts "{ type = \"non-null\", tbl = \"#{table_name}\", col = \"#{column.name}\" }," unless allow_nil
+          print_one_of_string(table_name, column.name, allowed_values)
+        end
+      end
+    end
 
     puts '// Restrict the "type" field of base classes.'
     models.each do |model|
@@ -202,6 +227,7 @@ namespace :constraints do
       all_type_names = (model.descendants + [model]).map(&:sti_name)
       print_one_of_string(table_name, inheritance_column, all_type_names)
     end
+    puts
 
     puts ']'
   end
