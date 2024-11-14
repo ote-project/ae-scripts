@@ -1,3 +1,5 @@
+# To use this rake task: In the `lib/tasks` directory of your Rails application, create a symbolic link to this file;
+# then run `bin/rake constraints:extract` in the application directory.  The constraints will be printed to stdout.
 namespace :constraints do
   desc 'Extracts database constraints for an application'
 
