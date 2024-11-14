@@ -18,7 +18,7 @@ cd "$HOME/dse"
 
 cd "concolic_driver"
 for handler in "${HANDLERS[@]}"; do
-  DSE_TRACK_LT=1 sbt -mem 2048 \
+  DSE_TRACK_LT=1 sbt -mem 20480 \
     "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ExploreExecutions
       ${HOME}/dse/examples/${APP}_${handler}.conf
       ${HOME}/dse/logs/${APP}-${handler}-${suffix}
