@@ -75,7 +75,7 @@ namespace :constraints do
           next if inverses.empty? # TODO(zhangwen): what's the deal with ActiveAdmin Comment?
 
           all_type_names = inverses.map { |a| a.active_record.name }
-          puts "{ type = \"one-of-string\", tbl = \"#{from_tbl}\", col = \"#{from_type_col}\", allowed-values = [#{all_type_names.map { |n| "\"#{n}\"" }.join(', ')}] },"
+          print_one_of_string(from_tbl, from_type_col, all_type_names)
 
           if inverses.length == 1
             a = inverses.first
@@ -181,10 +181,26 @@ namespace :constraints do
       end
     end
 
+    puts '// Restrict the "type" field of base classes.'
+    models.each do |model|
+      table_name = model.table_name
+      inheritance_column = model.inheritance_column
+      next unless model.has_attribute?(inheritance_column)
+      next unless model.base_class == model
+
+      all_type_names = (model.descendants + [model]).map(&:sti_name)
+      print_one_of_string(table_name, inheritance_column, all_type_names)
+    end
+
     puts ']'
   end
 
   def print_non_null(tbl, col)
     puts "{ type = \"non-null\", tbl = \"#{tbl}\", col = \"#{col}\" },"
+  end
+
+  def print_one_of_string(tbl, col, allowed_values)
+    allowed_values = allowed_values.uniq
+    puts "{ type = \"one-of-string\", tbl = \"#{tbl}\", col = \"#{col}\", allowed-values = [#{allowed_values.map { |v| "\"#{v}\"" }.join(', ')}] },"
   end
 end
