@@ -82,6 +82,16 @@ namespace :constraints do
             to_tbl = a.active_record.table_name
             to_col = a.join_foreign_key
             puts "{ type = \"foreign-key-non-null\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
+          else
+            inverses.each do |a|
+              type_name = a.active_record.name
+              to_tbl = a.active_record.table_name
+              to_col = a.join_foreign_key
+              print_query_is_set_contained_in(
+                "SELECT `#{from_col}` FROM `#{from_tbl}` WHERE `#{from_type_col}` = '#{type_name}'",
+                "SELECT `#{to_col}` FROM `#{to_tbl}`"
+              )
+            end
           end
         else
           begin
@@ -98,9 +108,10 @@ namespace :constraints do
             # Using single-table inheritance, and has no subclasses.
             # So the "to-type" must be the STI name of the class.
             to_type = to_klass.sti_name
-            sql1 = "SELECT `#{from_col}` FROM `#{from_tbl}`"
-            sql2 = "SELECT `#{to_col}` FROM `#{to_tbl}` WHERE `#{to_klass.inheritance_column}` = '#{to_type}'"
-            puts "{ type = \"query-is-set-contained-in\", sql-1 = \"#{sql1}\", sql-2 = \"#{sql2}\" },"
+            print_query_is_set_contained_in(
+              "SELECT `#{from_col}` FROM `#{from_tbl}`",
+              "SELECT `#{to_col}` FROM `#{to_tbl}` WHERE `#{to_klass.inheritance_column}` = '#{to_type}'"
+            )
             print_non_null(from_tbl, from_col) unless is_optional
           else
             type = is_optional ? 'foreign-key' : 'foreign-key-non-null'
@@ -202,5 +213,9 @@ namespace :constraints do
   def print_one_of_string(tbl, col, allowed_values)
     allowed_values = allowed_values.uniq
     puts "{ type = \"one-of-string\", tbl = \"#{tbl}\", col = \"#{col}\", allowed-values = [#{allowed_values.map { |v| "\"#{v}\"" }.join(', ')}] },"
+  end
+
+  def print_query_is_set_contained_in(sql1, sql2)
+    puts "{ type = \"query-is-set-contained-in\", sql-1 = \"#{sql1}\", sql-2 = \"#{sql2}\" },"
   end
 end
