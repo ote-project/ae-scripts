@@ -5,6 +5,8 @@ namespace :constraints do
     string_like_types = %i[string text]
     has_macros = %i[has_one has_many]
 
+    puts 'constraints = ['
+
     conn = ActiveRecord::Base.connection
 
     Rails.application.eager_load!
@@ -26,6 +28,34 @@ namespace :constraints do
         puts "{ type = \"unique\", tbl = \"#{table_name}\", cols = [#{columns.map { |c| "\"#{c}\"" }.join(', ')}] },"
       end
     end
+
+    models.each do |model|
+      table_name = model.table_name
+      model.validators.each do |validator|
+        next unless validator.is_a?(ActiveRecord::Validations::UniquenessValidator)
+
+        options = validator.options.dup
+        options.delete(:allow_blank)
+        allow_nil = options.delete(:allow_nil)
+        scope = Array(options.delete(:scope))
+        next unless options.delete(:case_sensitive)
+        next unless options.empty? # We don't support other options.
+
+        attributes = validator.attributes
+        next unless attributes.size == 1 # There should be one and only one attribute. TODO: Validate this.
+
+        attribute = attributes.first
+        column = model.columns_hash[attribute.to_s]
+        next unless column
+
+        uniq_col_names = [column.name] + scope.map(&:to_s)
+        puts "{ type = \"unique\", tbl = \"#{table_name}\", cols = [#{uniq_col_names.map { |c| "\"#{c}\"" }.join(', ')}] },"
+
+        # Validate uniqueness without allow_nil
+        print_non_null(table_name, column.name) unless allow_nil
+      end
+    end
+
     puts
 
     puts '// Foreign keys.'
@@ -54,11 +84,28 @@ namespace :constraints do
             puts "{ type = \"foreign-key-non-null\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
           end
         else
-          to_tbl = association.klass.table_name
+          begin
+            to_klass = association.klass
+            to_tbl = to_klass.table_name
+          rescue NameError => e
+            puts "// Error: #{e}"
+            next
+          end
           to_col = association.association_primary_key
+          is_optional = association.options[:optional]
 
-          type = association.options[:optional] ? 'foreign-key' : 'foreign-key-non-null'
-          puts "{ type = \"#{type}\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
+          if to_klass.has_attribute?(to_klass.inheritance_column) && to_klass.descendants.empty?
+            # Using single-table inheritance, and has no subclasses.
+            # So the "to-type" must be the STI name of the class.
+            to_type = to_klass.sti_name
+            sql1 = "SELECT `#{from_col}` FROM `#{from_tbl}`"
+            sql2 = "SELECT `#{to_col}` FROM `#{to_tbl}` WHERE `#{to_klass.inheritance_column}` = '#{to_type}'"
+            puts "{ type = \"query-is-set-contained-in\", sql-1 = \"#{sql1}\", sql-2 = \"#{sql2}\" },"
+            print_non_null(from_tbl, from_col) unless is_optional
+          else
+            type = is_optional ? 'foreign-key' : 'foreign-key-non-null'
+            puts "{ type = \"#{type}\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
+          end
         end
       end
     end
@@ -84,33 +131,57 @@ namespace :constraints do
         values = defs.values
         next unless values.all?(Integer)
 
-        puts "{ type = \"one-of-int\", tbl = \"#{table_name}\", col = \"#{column.name}\", values = [#{values.join(', ')}] },"
+        puts "{ type = \"one-of-int\", tbl = \"#{table_name}\", col = \"#{column.name}\", allowed-values = [#{values.join(', ')}] },"
       end
     end
     puts
 
-    puts '// Presence.'
+    puts '// Presence and numericality.'
     models.each do |model|
+      table_name = model.table_name
       model.validators.each do |validator|
         next unless validator.is_a?(ActiveModel::Validations::PresenceValidator) ||
                     (validator.is_a?(ActiveModel::Validations::LengthValidator) && validator.options[:minimum]&.positive?)
 
-        attributes = validator.attributes
-        next unless attributes.size == 1 # There should be one and only one attribute. TODO(zhangwen): Validate this.
+        validator.attributes.each do |attr|
+          column = model.columns_hash[attr.to_s]
+          next unless column
 
-        attribute = attributes.first
-        column = model.columns_hash[attribute.to_s]
-        next unless column
+          # TODO(zhangwen): Not needed if the column is already constrained to be NOT NULL.
+          print_non_null(table_name, column.name)
 
-        # TODO(zhangwen): Not needed if the column is already constrained to be NOT NULL.
-        print_non_null(model.table_name, column.name)
+          # If the attribute is string or text, also constrain it to be not empty.
+          if string_like_types.include?(column.type)
+            puts "{ type = \"string-is-not-empty\", tbl = \"#{table_name}\", col = \"#{column.name}\" },"
+          end
+        end
+      end
 
-        # If the attribute is string or text, also constrain it to be not empty.
-        if string_like_types.include?(column.type)
-          puts "{ type = \"string-is-not-empty\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" },"
+      model.validators.select { |v| v.is_a?(ActiveModel::Validations::NumericalityValidator) }.each do |num_v|
+        options = num_v.options.dup
+        allow_nil = options.delete(:allow_nil)
+        greater_than_or_equal_to = options.delete(:greater_than_or_equal_to)
+        options.delete(:only_integer)
+        next unless options.empty?
+
+        num_v.attributes.each do |attr|
+          column = model.columns_hash[attr.to_s]
+          next unless column
+
+          puts "{ type = \"non-null\", tbl = \"#{table_name}\", col = \"#{column.name}\" }," unless allow_nil
+          if greater_than_or_equal_to
+            sql = "SELECT 1 FROM `#{table_name}` WHERE `#{column.name}` < #{greater_than_or_equal_to}"
+            if model.has_attribute?(model.inheritance_column)
+              # TODO(zhangwen): also applies to descendants.
+              sql += " AND `#{model.inheritance_column}` = '#{model.sti_name}'"
+            end
+            puts "{ type = \"query-is-empty\", sql = \"#{sql}\" },"
+          end
         end
       end
     end
+
+    puts ']'
   end
 
   def print_non_null(tbl, col)
