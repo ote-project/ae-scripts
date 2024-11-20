@@ -107,17 +107,18 @@ namespace :constraints do
           attribute = validator.attributes.first
           column = model.columns_hash[attribute.to_s]
           next unless column
-          puts "{ type = \"presence\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" }"
+          puts "{ type = \"non-null\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" }" # TODO(kerneyj) I'm not sure that presence == non-null, I think non-null is a subset of presence
+          # FIXME(kerneyj) So there is actually a lot more to the above, the real question is how to support spaces in the string encoding for Z3
         end
       end
 
-      # def extract_model_numericality_constraints(model)
-      #  model.validators.each do |validator|
-      #    next unless validator.is_a?(ActiveRecord::Validations::NumericalityValidator)
-      #    options = validator.options.dup
-      #    pp options
-      #  end
-      # end
+      def extract_model_numericality_constraints(model)
+        model.validators.each do |validator|
+          next unless validator.is_a?(ActiveRecord::Validations::NumericalityValidator)
+          options = validator.options.dup
+          pp options
+        end
+      end
 
       def extract_foreign_keys
         puts '// Foreign keys.'
