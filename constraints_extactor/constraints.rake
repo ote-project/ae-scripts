@@ -22,7 +22,7 @@ namespace :constraints do
         extract_primary_keys
         extract_unique_constraints
         extract_foreign_keys
-        extract_timestamp_constraints
+        # extract_timestamp_constraints
         extract_enum_constraints
         extract_presence_constraints
         # extract_sti_constraints
@@ -62,7 +62,9 @@ namespace :constraints do
         end
       end
 
-      def extract_timestamp_constraints # FIXME(kerneyj) I think all of these constraints are being thrown out
+      # in Diaspora these constraints do not appear in the manually generated constraints
+      # This represents 59 unused constraints
+      def extract_timestamp_constraints # ✓ FIXME(kerneyj) I think all of these constraints are being thrown out
         puts '// Timestamp NOT NULL constraints'
         @table_names.each do |table_name|
           columns = @conn.columns(table_name)
@@ -83,7 +85,10 @@ namespace :constraints do
             next unless column
 
             values = defs.values
-            next unless values.all?(Integer) # TODO(kerneyj) rails should check for this so I don't think this is necessary?
+            unless values.all?(Integer)
+              puts "// Error: Enum constraint for table #{table_name} with values (#{values}) not all Integers"
+              next
+            end
 
             puts "{ type = \"one-of-int\", tbl = \"#{table_name}\", col = \"#{column.name}\", allowed-values = [#{values.join(', ')}] },"
           end
@@ -95,7 +100,7 @@ namespace :constraints do
         puts '// Presence and numericality constraints'
         @models.each do |model|
           extract_model_presence_constraints(model)
-          # extract_model_numericality_constraints(model) # FIXME(kerneyj) when I look for ActiveRecord::Validations::NumericalityValidator, that class does not exist
+          # extract_model_numericality_constraints(model)
         end
         puts
       end
@@ -114,7 +119,7 @@ namespace :constraints do
 
       def extract_model_numericality_constraints(model) # ✓
         model.validators.each do |validator|
-          next unless validator.is_a?(ActiveRecord::Validations::NumericalityValidator) # FIXME(kerneyj) for some reason this type does not exist
+          next unless validator.is_a?(ActiveModel::Validations::NumericalityValidator) # FIXME(kerneyj) when I look for ActiveRecord::Validations::NumericalityValidator it does not exist
           options = validator.options.dup
         end
       end
@@ -163,14 +168,13 @@ namespace :constraints do
           "SELECT `#{to_col}` FROM `#{to_tbl}` WHERE `#{to_klass.inheritance_column}` = '#{to_type}'"
         )
         print_non_null(from_tbl, from_col) unless is_optional
-        # FIXME(kerneyj) again here I think I need to make a foreign key dependency?
       end
 
       def handle_polymorphic_association(from_tbl, from_col, association) # ✓
         return if association.options[:optional] # FIXME(kerneyj) If the has_one/has_many on the otherside is not optional then this is incorrect
         # furthermore, if the column in both models are optional then does should we not include the foreign key constraint
 
-        from_type_col = association.foreign_type # TODO(kerneyj) this should never be nil but in that case something bad has happened, add a check for fault-tol
+        from_type_col = association.foreign_type
         print_non_null(from_tbl, from_type_col)
 
         inverses = find_polymorphic_inverses(association)
@@ -209,10 +213,6 @@ namespace :constraints do
             "SELECT `#{from_col}` FROM `#{from_tbl}` WHERE `#{from_type_col}` = '#{type_name}'",
             "SELECT `#{to_col}` FROM `#{to_tbl}`"
           )
-          # FIXME(kerneyj) I think that this should also print foreign key non null
-          # This also begs an interestin question. Maybe Claude is just
-          # halucinating, but I wonder if there is something to
-          # query_is_set_contained_in approximating foreign-key-non-null
         end
       end
 
