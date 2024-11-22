@@ -9,14 +9,14 @@ namespace :constraints do
       STRING_LIKE_TYPES = %i[string text]
       HAS_MACROS = %i[has_one has_many]
 
-      def initialize
+      def initialize # ✓
         @conn = ActiveRecord::Base.connection
         Rails.application.eager_load!
         @models = ActiveRecord::Base.descendants.select { |m| m.table_name.present? }
         @table_names = @models.map(&:table_name).uniq
       end
 
-      def extract_all
+      def extract_all # ✓
         puts 'constraints = ['
 
         extract_primary_keys
@@ -32,7 +32,7 @@ namespace :constraints do
 
       private
 
-      def extract_primary_keys
+      def extract_primary_keys # ✓
         puts '// Primary keys.'
         @table_names.each do |table_name|
           primary_key = @conn.primary_key(table_name)
@@ -41,14 +41,14 @@ namespace :constraints do
         puts
       end
 
-      def extract_unique_constraints
+      def extract_unique_constraints # ✓
         puts '// Uniqueness constraints from indexes and validations.'
         extract_unique_indexes
         extract_uniqueness_validations
         puts
       end
 
-      def extract_unique_indexes
+      def extract_unique_indexes # ✓
         @table_names.each do |table_name|
           @conn.indexes(table_name).select(&:unique).each do |index|
             print_constraint("unique", table_name, index.columns)
@@ -56,13 +56,13 @@ namespace :constraints do
         end
       end
 
-      def extract_uniqueness_validations
+      def extract_uniqueness_validations # ✓
         @models.each do |model|
           process_uniqueness_validators(model)
         end
       end
 
-      def extract_timestamp_constraints
+      def extract_timestamp_constraints # FIXME(kerneyj) I think all of these constraints are being thrown out
         puts '// Timestamp NOT NULL constraints'
         @table_names.each do |table_name|
           columns = @conn.columns(table_name)
@@ -72,7 +72,7 @@ namespace :constraints do
         puts
       end
 
-      def extract_enum_constraints
+      def extract_enum_constraints # ✓
         puts '// Enum constraints'
         @models.each do |model|
           table_name = model.table_name
@@ -83,7 +83,7 @@ namespace :constraints do
             next unless column
 
             values = defs.values
-            next unless values.all?(Integer)
+            next unless values.all?(Integer) # TODO(kerneyj) rails should check for this so I don't think this is necessary?
 
             puts "{ type = \"one-of-int\", tbl = \"#{table_name}\", col = \"#{column.name}\", allowed-values = [#{values.join(', ')}] },"
           end
@@ -91,7 +91,7 @@ namespace :constraints do
         puts
       end
 
-      def extract_presence_constraints
+      def extract_presence_constraints # ✓
         puts '// Presence and numericality constraints'
         @models.each do |model|
           extract_model_presence_constraints(model)
@@ -100,7 +100,7 @@ namespace :constraints do
         puts
       end
 
-      def extract_model_presence_constraints(model)
+      def extract_model_presence_constraints(model) # ✓
         model.validators.each do |validator|
           next unless validator.is_a?(ActiveRecord::Validations::PresenceValidator)
           options = validator.options.dup
@@ -112,15 +112,14 @@ namespace :constraints do
         end
       end
 
-      def extract_model_numericality_constraints(model)
+      def extract_model_numericality_constraints(model) # ✓
         model.validators.each do |validator|
-          next unless validator.is_a?(ActiveRecord::Validations::NumericalityValidator)
+          next unless validator.is_a?(ActiveRecord::Validations::NumericalityValidator) # FIXME(kerneyj) for some reason this type does not exist
           options = validator.options.dup
-          pp options
         end
       end
 
-      def extract_foreign_keys
+      def extract_foreign_keys # ✓
         puts '// Foreign keys.'
         @models.each do |model|
           from_tbl = model.table_name
@@ -137,16 +136,7 @@ namespace :constraints do
         puts
       end
 
-      def handle_sti_association(from_tbl, from_col, to_tbl, to_col, to_klass, is_optional)
-        to_type = to_klass.sti_name
-        print_query_is_set_contained_in(
-          "SELECT `#{from_col}` FROM `#{from_tbl}`",
-          "SELECT `#{to_col}` FROM `#{to_tbl}` WHERE `#{to_klass.inheritance_column}` = '#{to_type}'"
-        )
-        print_non_null(from_tbl, from_col) unless is_optional
-      end
-
-      def handle_standard_association(from_tbl, from_col, association)
+      def handle_standard_association(from_tbl, from_col, association) # ✓
         begin
           to_klass = association.klass
           to_tbl = to_klass.table_name
@@ -166,10 +156,21 @@ namespace :constraints do
         end
       end
 
-      def handle_polymorphic_association(from_tbl, from_col, association)
-        return if association.options[:optional]
+      def handle_sti_association(from_tbl, from_col, to_tbl, to_col, to_klass, is_optional) # ✓
+        to_type = to_klass.sti_name
+        print_query_is_set_contained_in(
+          "SELECT `#{from_col}` FROM `#{from_tbl}`",
+          "SELECT `#{to_col}` FROM `#{to_tbl}` WHERE `#{to_klass.inheritance_column}` = '#{to_type}'"
+        )
+        print_non_null(from_tbl, from_col) unless is_optional
+        # FIXME(kerneyj) again here I think I need to make a foreign key dependency?
+      end
 
-        from_type_col = association.foreign_type
+      def handle_polymorphic_association(from_tbl, from_col, association) # ✓
+        return if association.options[:optional] # FIXME(kerneyj) If the has_one/has_many on the otherside is not optional then this is incorrect
+        # furthermore, if the column in both models are optional then does should we not include the foreign key constraint
+
+        from_type_col = association.foreign_type # TODO(kerneyj) this should never be nil but in that case something bad has happened, add a check for fault-tol
         print_non_null(from_tbl, from_type_col)
 
         inverses = find_polymorphic_inverses(association)
@@ -185,7 +186,7 @@ namespace :constraints do
         end
       end
 
-      def find_polymorphic_inverses(association)
+      def find_polymorphic_inverses(association) # ✓
         @models.flat_map(&:reflect_on_all_associations).select do |a|
           HAS_MACROS.include?(a.macro) &&
           a.options[:as] == association.name &&
@@ -193,13 +194,13 @@ namespace :constraints do
         end
       end
 
-      def handle_single_inverse(from_tbl, from_col, inverse)
+      def handle_single_inverse(from_tbl, from_col, inverse) # ✓
         to_tbl = inverse.active_record.table_name
         to_col = inverse.join_foreign_key
         puts "{ type = \"foreign-key-non-null\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
       end
 
-      def handle_multiple_inverses(from_tbl, from_col, from_type_col, inverses)
+      def handle_multiple_inverses(from_tbl, from_col, from_type_col, inverses) # ✓
         inverses.each do |inverse|
           type_name = inverse.active_record.name
           to_tbl = inverse.active_record.table_name
@@ -208,10 +209,14 @@ namespace :constraints do
             "SELECT `#{from_col}` FROM `#{from_tbl}` WHERE `#{from_type_col}` = '#{type_name}'",
             "SELECT `#{to_col}` FROM `#{to_tbl}`"
           )
+          # FIXME(kerneyj) I think that this should also print foreign key non null
+          # This also begs an interestin question. Maybe Claude is just
+          # halucinating, but I wonder if there is something to
+          # query_is_set_contained_in approximating foreign-key-non-null
         end
       end
 
-      def process_uniqueness_validators(model)
+      def process_uniqueness_validators(model) # ✓
         model.validators.each do |validator|
           next unless validator.is_a?(ActiveRecord::Validations::UniquenessValidator)
 
@@ -236,22 +241,22 @@ namespace :constraints do
         end
       end
 
-      def print_constraint(type, table, columns)
+      def print_constraint(type, table, columns) # ✓
         column_list = columns.map { |c| "\"#{c}\"" }.join(', ')
         puts "{ type = \"#{type}\", tbl = \"#{table}\", cols = [#{column_list}] },"
       end
 
-      def print_non_null(tbl, col)
+      def print_non_null(tbl, col) # ✓
         puts "{ type = \"non-null\", tbl = \"#{tbl}\", col = \"#{col}\" },"
       end
 
-      def print_one_of_string(tbl, col, allowed_values)
+      def print_one_of_string(tbl, col, allowed_values) # ✓
         allowed_values = allowed_values.uniq
         values_list = allowed_values.map { |v| "\"#{v}\"" }.join(', ')
         puts "{ type = \"one-of-string\", tbl = \"#{tbl}\", col = \"#{col}\", allowed-values = [#{values_list}] },"
       end
 
-      def print_query_is_set_contained_in(sql1, sql2)
+      def print_query_is_set_contained_in(sql1, sql2) # ✓
         puts "{ type = \"query-is-set-contained-in\", sql-1 = \"#{sql1}\", sql-2 = \"#{sql2}\" },"
       end
     end
