@@ -22,7 +22,7 @@ namespace :constraints do
         extract_primary_keys
         extract_unique_constraints
         extract_foreign_keys
-        # extract_timestamp_constraints
+        extract_timestamp_constraints
         extract_enum_constraints
         extract_presence_constraints
         # extract_sti_constraints
@@ -64,7 +64,7 @@ namespace :constraints do
 
       # in Diaspora these constraints do not appear in the manually generated constraints
       # This represents 59 unused constraints
-      def extract_timestamp_constraints # ✓ FIXME(kerneyj) I think all of these constraints are being thrown out
+      def extract_timestamp_constraints
         puts '// Timestamp NOT NULL constraints'
         @table_names.each do |table_name|
           columns = @conn.columns(table_name)
@@ -100,7 +100,9 @@ namespace :constraints do
         puts '// Presence and numericality constraints'
         @models.each do |model|
           extract_model_presence_constraints(model)
-          # extract_model_numericality_constraints(model)
+          extract_model_numericality_constraints(model)
+          extract_model_length_constraints(model)
+          extract_model_inclusion_constraints(model)
         end
         puts
       end
@@ -108,19 +110,83 @@ namespace :constraints do
       def extract_model_presence_constraints(model) # ✓
         model.validators.each do |validator|
           next unless validator.is_a?(ActiveRecord::Validations::PresenceValidator)
-          options = validator.options.dup
-          attribute = validator.attributes.first
-          column = model.columns_hash[attribute.to_s]
-          next unless column
-          puts "{ type = \"non-null\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" }" # TODO(kerneyj) I'm not sure that presence == non-null, I think non-null is a subset of presence
+
+          validator.attributes.each do |attr|
+            column = model.columns_hash[attr.to_s]
+            next unless column
+            print_non_null(model.table_name, column.name)
+
+            if STRING_LIKE_TYPES.include?(column.type)
+              puts "{ type = \"string-is-not-empty\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" },"
+            end
+          end
+          # FIXME(kerneyj) So there is actually a lot more to the above, the real question is how to support spaces in the string encoding for Z3
+        end
+      end
+
+      def extract_model_length_constraints(model) # ✓
+        model.validators.each do |validator|
+          next unless validator.is_a?(ActiveModel::Validations::LengthValidator) && validator.options[:minimum]&.positive?
+
+          validator.attributes.each do |attr|
+            column = model.columns_hash[attr.to_s]
+            next unless column
+            print_non_null(table_name, column.name)
+
+            if STRING_LIKE_TYPES.include?(column.type)
+              puts "{ type = \"string-is-not-empty\", tbl = \"#{table_name}\", col = \"#{column.name}\" },"
+            end
+          end
           # FIXME(kerneyj) So there is actually a lot more to the above, the real question is how to support spaces in the string encoding for Z3
         end
       end
 
       def extract_model_numericality_constraints(model) # ✓
-        model.validators.each do |validator|
-          next unless validator.is_a?(ActiveModel::Validations::NumericalityValidator) # FIXME(kerneyj) when I look for ActiveRecord::Validations::NumericalityValidator it does not exist
-          options = validator.options.dup
+        model.validators.select { |v| v.is_a?(ActiveModel::Validations::NumericalityValidator) }.each do |num_v|
+          #next unless validator.is_a?(ActiveModel::Validations::NumericalityValidator) # FIXME(kerneyj) when I look for ActiveRecord::Validations::NumericalityValidator it does not exist
+          # options = validator.options.dup
+          options = num_v.options.dup
+          allow_nil = options.delete(:allow_nil)
+          greater_than_or_equal_to = options.delete(:greater_than_or_equal_to)
+          options.delete(:only_integer)
+          next unless options.empty?
+
+          num_v.attributes.each do |attr|
+            column = model.columns_hash[attr.to_s]
+            next unless column
+
+            puts "{ type = \"non-null\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" }," unless allow_nil
+            if greater_than_or_equal_to
+              sql = "SELECT 1 FROM `#{model.table_name}` WHERE `#{column.name}` < #{greater_than_or_equal_to}"
+              if model.has_attribute?(model.inheritance_column)
+                # TODO(zhangwen): also applies to descendants.
+                sql += " AND `#{model.inheritance_column}` = '#{model.sti_name}'"
+              end
+              puts "{ type = \"query-is-empty\", sql = \"#{sql}\" },"
+            end
+          end
+        end
+      end
+
+      def extract_model_inclusion_constraints(model)
+        model.validators.select { |v| v.is_a?(ActiveModel::Validations::InclusionValidator) }.each do |inc_v|
+          options = inc_v.options.dup
+          allow_nil = options.delete(:allow_nil)
+          allowed_values = options.delete(:in) || options.delete(:within)
+          options.delete(:within)
+          options.delete(:message)
+
+          next unless options.empty?
+          next unless allowed_values.is_a?(Array)
+          next unless allowed_values.all? { |v| v.is_a?(String) }
+
+          inc_v.attributes.each do |attr|
+            column = model.columns_hash[attr.to_s]
+            next unless column
+
+            puts "{ type = \"non-null\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" }," unless allow_nil
+            print_one_of_string(model.table_name, column.name, allowed_values)
+          end
         end
       end
 
