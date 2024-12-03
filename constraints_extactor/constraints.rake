@@ -1,5 +1,5 @@
 # frozen_string_literal: true
-# require 'pp'
+require 'pp'
 
 namespace :constraints do
   desc 'Extracts and documents all database constraints from a Rails application'
@@ -22,12 +22,14 @@ namespace :constraints do
         extract_primary_keys
         extract_unique_constraints
         extract_foreign_keys
-        extract_timestamp_constraints
+        # extract_timestamp_constraints
         extract_enum_constraints
         extract_presence_constraints
-        # extract_sti_constraints
 
         puts ']'
+
+        #print_validators
+        #print_has
       end
 
       private
@@ -36,6 +38,10 @@ namespace :constraints do
         puts '// Primary keys.'
         @table_names.each do |table_name|
           primary_key = @conn.primary_key(table_name)
+          if not primary_key
+            puts "// Error #{table_name} has nil primary key"
+            next
+          end
           print_constraint("unique", table_name, [primary_key])
         end
         puts
@@ -90,7 +96,7 @@ namespace :constraints do
               next
             end
 
-            puts "{ type = \"one-of-int\", tbl = \"#{table_name}\", col = \"#{column.name}\", allowed-values = [#{values.join(', ')}] },"
+            print_one_of_int(table_name, column.name, values.join(', '))
           end
         end
         puts
@@ -117,7 +123,8 @@ namespace :constraints do
             print_non_null(model.table_name, column.name)
 
             if STRING_LIKE_TYPES.include?(column.type)
-              puts "{ type = \"string-is-not-empty\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" },"
+              print_string_is_not_empty(model.table_name, column.name)
+              #puts "{ type = \"string-is-not-empty\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" },"
             end
           end
           # FIXME(kerneyj) So there is actually a lot more to the above, the real question is how to support spaces in the string encoding for Z3
@@ -134,7 +141,8 @@ namespace :constraints do
             print_non_null(table_name, column.name)
 
             if STRING_LIKE_TYPES.include?(column.type)
-              puts "{ type = \"string-is-not-empty\", tbl = \"#{table_name}\", col = \"#{column.name}\" },"
+              print_string_is_not_empty(table_name, column.name)
+              #puts "{ type = \"string-is-not-empty\", tbl = \"#{table_name}\", col = \"#{column.name}\" },"
             end
           end
           # FIXME(kerneyj) So there is actually a lot more to the above, the real question is how to support spaces in the string encoding for Z3
@@ -143,8 +151,6 @@ namespace :constraints do
 
       def extract_model_numericality_constraints(model) # ✓
         model.validators.select { |v| v.is_a?(ActiveModel::Validations::NumericalityValidator) }.each do |num_v|
-          #next unless validator.is_a?(ActiveModel::Validations::NumericalityValidator) # FIXME(kerneyj) when I look for ActiveRecord::Validations::NumericalityValidator it does not exist
-          # options = validator.options.dup
           options = num_v.options.dup
           allow_nil = options.delete(:allow_nil)
           greater_than_or_equal_to = options.delete(:greater_than_or_equal_to)
@@ -155,14 +161,14 @@ namespace :constraints do
             column = model.columns_hash[attr.to_s]
             next unless column
 
-            puts "{ type = \"non-null\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" }," unless allow_nil
+            print_non_null(model.table_name, column.name) unless allow_nil
             if greater_than_or_equal_to
               sql = "SELECT 1 FROM `#{model.table_name}` WHERE `#{column.name}` < #{greater_than_or_equal_to}"
               if model.has_attribute?(model.inheritance_column)
                 # TODO(zhangwen): also applies to descendants.
                 sql += " AND `#{model.inheritance_column}` = '#{model.sti_name}'"
               end
-              puts "{ type = \"query-is-empty\", sql = \"#{sql}\" },"
+              print_query_is_empty(sql)
             end
           end
         end
@@ -184,7 +190,7 @@ namespace :constraints do
             column = model.columns_hash[attr.to_s]
             next unless column
 
-            puts "{ type = \"non-null\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" }," unless allow_nil
+            print_non_null(model.table_name, column.name) unless allow_nil
             print_one_of_string(model.table_name, column.name, allowed_values)
           end
         end
@@ -222,8 +228,9 @@ namespace :constraints do
         if to_klass.has_attribute?(to_klass.inheritance_column) && to_klass.descendants.empty?
           handle_sti_association(from_tbl, from_col, to_tbl, to_col, to_klass, is_optional)
         else
-          type = is_optional ? 'foreign-key' : 'foreign-key-non-null'
-          puts "{ type = \"#{type}\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
+          # type = is_optional ? 'foreign-key' : 'foreign-key-non-null'
+          # type = 'foreign-key'
+          print_foreign_key(to_tbl, to_col, from_tbl, from_col, false)
         end
       end
 
@@ -267,7 +274,7 @@ namespace :constraints do
       def handle_single_inverse(from_tbl, from_col, inverse) # ✓
         to_tbl = inverse.active_record.table_name
         to_col = inverse.join_foreign_key
-        puts "{ type = \"foreign-key-non-null\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
+        print_foreign_key(to_tbl, to_col, from_tbl, from_col, true)
       end
 
       def handle_multiple_inverses(from_tbl, from_col, from_type_col, inverses) # ✓
@@ -312,6 +319,26 @@ namespace :constraints do
         puts "{ type = \"#{type}\", tbl = \"#{table}\", cols = [#{column_list}] },"
       end
 
+      def print_foreign_key(totbl, tocol, frtbl, frcol, nonnull)
+        if nonnull
+          puts "{ type = foreign-key-non-null, from-tbl = \"#{frtbl}\", from-col = \"#{frcol}\", to-tbl = \"#{totbl}\", to-col = \"#{tocol}\" },"
+        else
+          puts "{ type = foreign-key, from-tbl = \"#{frtbl}\", from-col = \"#{frcol}\", to-tbl = \"#{totbl}\", to-col = \"#{tocol}\" },"
+        end
+      end
+
+      def print_one_of_int(tbl, col, values)
+        puts "{ type = \"one-of-int\", tbl = \"#{tbl}\", col = \"#{col}\", allowed-values = [#{values}] },"
+      end
+
+      def print_query_is_empty(sql)
+        puts "{ type = \"query-is-empty\", sql = \"#{sql}\" },"
+      end
+
+      def print_string_is_not_empty(tbl, col)
+        puts "{ type = \"string-is-not-empty\", tbl = \"#{tbl}\", col = \"#{col}\" },"
+      end
+
       def print_non_null(tbl, col) # ✓
         puts "{ type = \"non-null\", tbl = \"#{tbl}\", col = \"#{col}\" },"
       end
@@ -327,6 +354,32 @@ namespace :constraints do
       end
     end
 
+    def print_validators
+      @models.each do |model|
+        model.validators.each do |validator|
+          table_name = model.table_name
+          next unless validator.is_a?(ActiveRecord::Validations::AssociatedValidator)
+          validator.attributes.each do |attr|
+            puts "#{table_name}: #{attr.to_s}"
+          end
+        end
+      end
+    end
+
+    def print_has
+      @models.each do |model|
+        next unless model.table_name == "posts"
+        puts "table name: #{model.table_name}"
+        model.reflect_on_all_associations(:has_one).each do |association|
+          pp association
+        end
+
+        model.reflect_on_all_associations(:has_many).each do |association|
+          pp association
+        end
+        puts
+      end
+    end
     ConstraintExtractor.new.extract_all
   end
 end
