@@ -22,7 +22,7 @@ namespace :constraints do
         extract_primary_keys
         extract_unique_constraints
         extract_foreign_keys
-        # extract_timestamp_constraints
+        extract_timestamp_constraints
         extract_enum_constraints
         extract_presence_constraints
 
@@ -42,7 +42,7 @@ namespace :constraints do
             puts "// Error #{table_name} has nil primary key"
             next
           end
-          print_constraint("unique", table_name, [primary_key])
+          print_constraint("unique", table_name, [primary_key], "extract_primary_keys => print_constraint")
         end
         puts
       end
@@ -57,7 +57,7 @@ namespace :constraints do
       def extract_unique_indexes # ✓
         @table_names.each do |table_name|
           @conn.indexes(table_name).select(&:unique).each do |index|
-            print_constraint("unique", table_name, index.columns)
+            print_constraint("unique", table_name, index.columns, "extract_unique_indexes => print_constraint")
           end
         end
       end
@@ -68,14 +68,12 @@ namespace :constraints do
         end
       end
 
-      # in Diaspora these constraints do not appear in the manually generated constraints
-      # This represents 59 unused constraints
       def extract_timestamp_constraints
         puts '// Timestamp NOT NULL constraints'
         @table_names.each do |table_name|
           columns = @conn.columns(table_name)
-          print_non_null(table_name, 'created_at') if columns.any? { |c| c.name == 'created_at' }
-          print_non_null(table_name, 'updated_at') if columns.any? { |c| c.name == 'updated_at' }
+          print_non_null(table_name, 'created_at', "extract_timestamp_constraints => print_non_null") if columns.any? { |c| c.name == 'created_at' }
+          print_non_null(table_name, 'updated_at', "extract_timestamp_constraints => print_non_null") if columns.any? { |c| c.name == 'updated_at' }
         end
         puts
       end
@@ -96,7 +94,7 @@ namespace :constraints do
               next
             end
 
-            print_one_of_int(table_name, column.name, values.join(', '))
+            print_one_of_int(table_name, column.name, values.join(', '), "extract_enum_constraints => print_one_of_int")
           end
         end
         puts
@@ -120,32 +118,30 @@ namespace :constraints do
           validator.attributes.each do |attr|
             column = model.columns_hash[attr.to_s]
             next unless column
-            print_non_null(model.table_name, column.name)
+            print_non_null(model.table_name, column.name, "extract_model_presence_constraints => print_non_null")
 
             if STRING_LIKE_TYPES.include?(column.type)
-              print_string_is_not_empty(model.table_name, column.name)
-              #puts "{ type = \"string-is-not-empty\", tbl = \"#{model.table_name}\", col = \"#{column.name}\" },"
+              print_string_is_not_empty(model.table_name, column.name, "extract_model_presence_constraints => print_string_is_not_empty")
             end
+
           end
           # FIXME(kerneyj) So there is actually a lot more to the above, the real question is how to support spaces in the string encoding for Z3
         end
       end
 
-      def extract_model_length_constraints(model) # ✓
+      def extract_model_length_constraints(model) # TODO(kerneyj) This should be expressed differently, we need an actual length validator
         model.validators.each do |validator|
           next unless validator.is_a?(ActiveModel::Validations::LengthValidator) && validator.options[:minimum]&.positive?
 
           validator.attributes.each do |attr|
             column = model.columns_hash[attr.to_s]
             next unless column
-            print_non_null(table_name, column.name)
+            print_non_null(table_name, column.name, "extract_model_length_constraints => print_non_null")
 
             if STRING_LIKE_TYPES.include?(column.type)
-              print_string_is_not_empty(table_name, column.name)
-              #puts "{ type = \"string-is-not-empty\", tbl = \"#{table_name}\", col = \"#{column.name}\" },"
+              print_string_is_not_empty(table_name, column.name, "extract_model_length_constraints => print_non_null")
             end
           end
-          # FIXME(kerneyj) So there is actually a lot more to the above, the real question is how to support spaces in the string encoding for Z3
         end
       end
 
@@ -161,14 +157,14 @@ namespace :constraints do
             column = model.columns_hash[attr.to_s]
             next unless column
 
-            print_non_null(model.table_name, column.name) unless allow_nil
+            print_non_null(model.table_name, column.name, "extract_model_numericality_constraints => print_non_null") unless allow_nil
             if greater_than_or_equal_to
               sql = "SELECT 1 FROM `#{model.table_name}` WHERE `#{column.name}` < #{greater_than_or_equal_to}"
               if model.has_attribute?(model.inheritance_column)
                 # TODO(zhangwen): also applies to descendants.
                 sql += " AND `#{model.inheritance_column}` = '#{model.sti_name}'"
               end
-              print_query_is_empty(sql)
+              print_query_is_empty(sql, "extract_model_numericality_constraints => print_query_is_empty")
             end
           end
         end
@@ -190,8 +186,8 @@ namespace :constraints do
             column = model.columns_hash[attr.to_s]
             next unless column
 
-            print_non_null(model.table_name, column.name) unless allow_nil
-            print_one_of_string(model.table_name, column.name, allowed_values)
+            print_non_null(model.table_name, column.name, "extract_model_inclusion_constraints => print_non_null") unless allow_nil
+            print_one_of_string(model.table_name, column.name, allowed_values, "extract_model_inclusion_constraints => print_one_of_string")
           end
         end
       end
@@ -228,9 +224,12 @@ namespace :constraints do
         if to_klass.has_attribute?(to_klass.inheritance_column) && to_klass.descendants.empty?
           handle_sti_association(from_tbl, from_col, to_tbl, to_col, to_klass, is_optional)
         else
-          # type = is_optional ? 'foreign-key' : 'foreign-key-non-null'
-          # type = 'foreign-key'
-          print_foreign_key(to_tbl, to_col, from_tbl, from_col, false)
+
+          if is_optional
+            print_foreign_key(to_tbl, to_col, from_tbl, from_col, "handle_standard_association => print_foreign_key")
+          else
+            print_foreign_key_non_null(to_tbl, to_col, from_tbl, from_col, "handle_standard_association => print_foreign_key_non_null")
+          end
         end
       end
 
@@ -238,9 +237,9 @@ namespace :constraints do
         to_type = to_klass.sti_name
         print_query_is_set_contained_in(
           "SELECT `#{from_col}` FROM `#{from_tbl}`",
-          "SELECT `#{to_col}` FROM `#{to_tbl}` WHERE `#{to_klass.inheritance_column}` = '#{to_type}'"
-        )
-        print_non_null(from_tbl, from_col) unless is_optional
+          "SELECT `#{to_col}` FROM `#{to_tbl}` WHERE `#{to_klass.inheritance_column}` = '#{to_type}'",
+          "handle_sti_association => print_query_is_set_contained_in")
+        print_non_null(from_tbl, from_col, "handle_sti_association => print_non_null") unless is_optional
       end
 
       def handle_polymorphic_association(from_tbl, from_col, association) # ✓
@@ -248,13 +247,13 @@ namespace :constraints do
         # furthermore, if the column in both models are optional then does should we not include the foreign key constraint
 
         from_type_col = association.foreign_type
-        print_non_null(from_tbl, from_type_col)
+        print_non_null(from_tbl, from_type_col, "handle_polymorphic_association => print_non_null")
 
         inverses = find_polymorphic_inverses(association)
         return if inverses.empty?
 
         all_type_names = inverses.map { |a| a.active_record.name }
-        print_one_of_string(from_tbl, from_type_col, all_type_names)
+        print_one_of_string(from_tbl, from_type_col, all_type_names, "handle_polymorphic_association => print_one_of_string")
 
         if inverses.length == 1
           handle_single_inverse(from_tbl, from_col, inverses.first)
@@ -263,7 +262,8 @@ namespace :constraints do
         end
       end
 
-      def find_polymorphic_inverses(association) # ✓
+      # find all of the has_one/has_many associations the map to the given belong_to association
+      def find_polymorphic_inverses(association)
         @models.flat_map(&:reflect_on_all_associations).select do |a|
           HAS_MACROS.include?(a.macro) &&
           a.options[:as] == association.name &&
@@ -274,7 +274,7 @@ namespace :constraints do
       def handle_single_inverse(from_tbl, from_col, inverse) # ✓
         to_tbl = inverse.active_record.table_name
         to_col = inverse.join_foreign_key
-        print_foreign_key(to_tbl, to_col, from_tbl, from_col, true)
+        print_foreign_key_non_null(to_tbl, to_col, from_tbl, from_col, "handle_single_inverse => print_foreign_key_non_null")
       end
 
       def handle_multiple_inverses(from_tbl, from_col, from_type_col, inverses) # ✓
@@ -284,8 +284,8 @@ namespace :constraints do
           to_col = inverse.join_foreign_key
           print_query_is_set_contained_in(
             "SELECT `#{from_col}` FROM `#{from_tbl}` WHERE `#{from_type_col}` = '#{type_name}'",
-            "SELECT `#{to_col}` FROM `#{to_tbl}`"
-          )
+            "SELECT `#{to_col}` FROM `#{to_tbl}`",
+            "handle_multiple_inverses => print_query_is_set_contained_in")
         end
       end
 
@@ -307,50 +307,50 @@ namespace :constraints do
           next unless column
 
           uniq_col_names = [column.name] + scope.map(&:to_s)
-          print_constraint("unique", model.table_name, uniq_col_names)
+          print_constraint("unique", model.table_name, uniq_col_names, "process_uniqueness_validators => print_constraint")
 
           # Add NOT NULL constraint if allow_nil is false
-          print_non_null(model.table_name, column.name) unless allow_nil
+          print_non_null(model.table_name, column.name, "process_uniqueness_validators => print_non_null") unless allow_nil
         end
       end
 
-      def print_constraint(type, table, columns) # ✓
+      def print_constraint(type, table, columns, where) # ✓
         column_list = columns.map { |c| "\"#{c}\"" }.join(', ')
-        puts "{ type = \"#{type}\", tbl = \"#{table}\", cols = [#{column_list}] },"
+        puts "{ type = \"#{type}\", tbl = \"#{table}\", cols = [#{column_list}] }, // #{where}"
       end
 
-      def print_foreign_key(totbl, tocol, frtbl, frcol, nonnull)
-        if nonnull
-          puts "{ type = foreign-key-non-null, from-tbl = \"#{frtbl}\", from-col = \"#{frcol}\", to-tbl = \"#{totbl}\", to-col = \"#{tocol}\" },"
-        else
-          puts "{ type = foreign-key, from-tbl = \"#{frtbl}\", from-col = \"#{frcol}\", to-tbl = \"#{totbl}\", to-col = \"#{tocol}\" },"
-        end
+      def print_foreign_key(totbl, tocol, frtbl, frcol, where)
+        puts "{ type = foreign-key, from-tbl = \"#{frtbl}\", from-col = \"#{frcol}\", to-tbl = \"#{totbl}\", to-col = \"#{tocol}\" }, // #{where}"
       end
 
-      def print_one_of_int(tbl, col, values)
-        puts "{ type = \"one-of-int\", tbl = \"#{tbl}\", col = \"#{col}\", allowed-values = [#{values}] },"
+      def print_foreign_key_non_null(totbl, tocol, frtbl, frcol, where)
+        puts "{ type = foreign-key-non-null, from-tbl = \"#{frtbl}\", from-col = \"#{frcol}\", to-tbl = \"#{totbl}\", to-col = \"#{tocol}\" }, // #{where}"
       end
 
-      def print_query_is_empty(sql)
-        puts "{ type = \"query-is-empty\", sql = \"#{sql}\" },"
+      def print_one_of_int(tbl, col, values, where)
+        puts "{ type = \"one-of-int\", tbl = \"#{tbl}\", col = \"#{col}\", allowed-values = [#{values}] }, // #{where}"
       end
 
-      def print_string_is_not_empty(tbl, col)
-        puts "{ type = \"string-is-not-empty\", tbl = \"#{tbl}\", col = \"#{col}\" },"
+      def print_query_is_empty(sql, where)
+        puts "{ type = \"query-is-empty\", sql = \"#{sql}\" }, // #{where}"
       end
 
-      def print_non_null(tbl, col) # ✓
-        puts "{ type = \"non-null\", tbl = \"#{tbl}\", col = \"#{col}\" },"
+      def print_string_is_not_empty(tbl, col, where)
+        puts "{ type = \"string-is-not-empty\", tbl = \"#{tbl}\", col = \"#{col}\" }, // #{where}"
       end
 
-      def print_one_of_string(tbl, col, allowed_values) # ✓
+      def print_non_null(tbl, col, where) # ✓
+        puts "{ type = \"non-null\", tbl = \"#{tbl}\", col = \"#{col}\" }, // #{where}"
+      end
+
+      def print_one_of_string(tbl, col, allowed_values, where) # ✓
         allowed_values = allowed_values.uniq
         values_list = allowed_values.map { |v| "\"#{v}\"" }.join(', ')
-        puts "{ type = \"one-of-string\", tbl = \"#{tbl}\", col = \"#{col}\", allowed-values = [#{values_list}] },"
+        puts "{ type = \"one-of-string\", tbl = \"#{tbl}\", col = \"#{col}\", allowed-values = [#{values_list}] }, // #{where}"
       end
 
-      def print_query_is_set_contained_in(sql1, sql2) # ✓
-        puts "{ type = \"query-is-set-contained-in\", sql-1 = \"#{sql1}\", sql-2 = \"#{sql2}\" },"
+      def print_query_is_set_contained_in(sql1, sql2, where) # ✓
+        puts "{ type = \"query-is-set-contained-in\", sql-1 = \"#{sql1}\", sql-2 = \"#{sql2}\" }, // #{where}"
       end
     end
 
