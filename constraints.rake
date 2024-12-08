@@ -245,6 +245,7 @@ namespace :constraints do
     raise ArgumentError unless %w[foreign-key foreign-key-non-null].include?(type)
 
     # Make sure columns really exist.  Autolab appears to have bogus belongs_to associations.
+    # FIXME(zhangwen): This also happens in Diaspora.  Look into why.
     conn = ActiveRecord::Base.connection
     unless conn.columns(from_tbl).any? { |c| c.name == from_col.to_s }
       puts "// Warning (#{type}): column `#{from_col}` does not exist in table `#{from_tbl}`."
