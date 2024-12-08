@@ -84,7 +84,7 @@ namespace :constraints do
             a = inverses.first
             to_tbl = a.active_record.table_name
             to_col = a.join_foreign_key
-            puts "{ type = \"foreign-key-non-null\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
+            print_foreign_key('foreign-key-non-null', from_tbl, from_col, to_tbl, to_col)
           else
             inverses.each do |a|
               type_name = a.active_record.name
@@ -118,7 +118,7 @@ namespace :constraints do
             print_non_null(from_tbl, from_col) unless is_optional
           else
             type = is_optional ? 'foreign-key' : 'foreign-key-non-null'
-            puts "{ type = \"#{type}\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
+            print_foreign_key(type, from_tbl, from_col, to_tbl, to_col)
           end
         end
       end
@@ -202,6 +202,7 @@ namespace :constraints do
       model.validators.select { |v| v.is_a?(ActiveModel::Validations::InclusionValidator) }.each do |inc_v|
         options = inc_v.options.dup
         allow_nil = options.delete(:allow_nil)
+        allow_blank = options.delete(:allow_blank)
         allowed_values = options.delete(:in) || options.delete(:within)
         options.delete(:within)
         options.delete(:message)
@@ -209,6 +210,7 @@ namespace :constraints do
         next unless options.empty?
         next unless allowed_values.is_a?(Array)
         next unless allowed_values.all? { |v| v.is_a?(String) }
+        allowed_values = allowed_values + [''] if allow_blank
 
         inc_v.attributes.each do |attr|
           column = model.columns_hash[attr.to_s]
@@ -237,6 +239,23 @@ namespace :constraints do
 
   def print_non_null(tbl, col)
     puts "{ type = \"non-null\", tbl = \"#{tbl}\", col = \"#{col}\" },"
+  end
+
+  def print_foreign_key(type, from_tbl, from_col, to_tbl, to_col)
+    raise ArgumentError unless %w[foreign-key foreign-key-non-null].include?(type)
+
+    # Make sure columns really exist.  Autolab appears to have bogus belongs_to associations.
+    conn = ActiveRecord::Base.connection
+    unless conn.columns(from_tbl).any? { |c| c.name == from_col }
+      puts "// Warning (#{type}): column `#{from_col}` does not exist in table `#{from_tbl}`."
+      return
+    end
+    unless conn.columns(to_tbl).any? { |c| c.name == to_col }
+      puts "// Warning (#{type}): column `#{to_col}` does not exist in table `#{to_tbl}`."
+      return
+    end
+
+    puts "{ type = \"#{type}\", from-tbl = \"#{from_tbl}\", from-col = \"#{from_col}\", to-tbl = \"#{to_tbl}\", to-col = \"#{to_col}\" },"
   end
 
   def print_one_of_string(tbl, col, allowed_values)
