@@ -295,10 +295,10 @@ namespace :constraints do
           table_name = model.table_name
           inheritance_column = model.inheritance_column
           next unless model.has_attribute?(inheritance_column)
-          next unless model.base_class = model
+          next unless model.base_class == model
 
-          all_types_names = (model.descendants + [model]).map(&:sti_name)
-          print_one_of_string(table_name, inheritance_column, all_type_names)
+          all_type_names = (model.descendants + [model]).map(&:sti_name)
+          print_one_of_string(table_name, inheritance_column, all_type_names, "Line 301")
         end
       end
 
