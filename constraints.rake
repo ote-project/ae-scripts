@@ -51,7 +51,13 @@ namespace :constraints do
         column = model.columns_hash[attribute.to_s]
         next unless column
 
-        uniq_col_names = [column.name] + scope.map(&:to_s)
+        scope_col_names = scope.map do |s|
+          reflection = model.reflect_on_association(s)
+          reflection ? reflection.foreign_key : model.columns_hash[s.to_s]&.name
+        end
+        next unless scope_col_names.all?
+
+        uniq_col_names = [column.name] + scope_col_names
         puts "{ type = \"unique\", tbl = \"#{table_name}\", cols = [#{uniq_col_names.map { |c| "\"#{c}\"" }.join(', ')}] },"
 
         # Validate uniqueness without allow_nil
