@@ -246,11 +246,11 @@ namespace :constraints do
 
     # Make sure columns really exist.  Autolab appears to have bogus belongs_to associations.
     conn = ActiveRecord::Base.connection
-    unless conn.columns(from_tbl).any? { |c| c.name == from_col }
+    unless conn.columns(from_tbl).any? { |c| c.name == from_col.to_s }
       puts "// Warning (#{type}): column `#{from_col}` does not exist in table `#{from_tbl}`."
       return
     end
-    unless conn.columns(to_tbl).any? { |c| c.name == to_col }
+    unless conn.columns(to_tbl).any? { |c| c.name == to_col.to_s }
       puts "// Warning (#{type}): column `#{to_col}` does not exist in table `#{to_tbl}`."
       return
     end
