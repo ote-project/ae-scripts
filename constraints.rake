@@ -18,6 +18,7 @@ namespace :constraints do
     puts '// Primary keys.'
     table_names.each do |table_name|
       primary_key = conn.primary_key(table_name)
+      next unless primary_key
       puts "{ type = \"unique\", tbl = \"#{table_name}\", cols = [\"#{primary_key}\"] },"
     end
     puts
