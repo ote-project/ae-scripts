@@ -41,6 +41,7 @@ namespace :constraints do
         options.delete(:allow_blank)
         allow_nil = options.delete(:allow_nil)
         scope = Array(options.delete(:scope))
+        # TODO(zhangwen): Ignore `message` too.
         next unless options.delete(:case_sensitive)
         next unless options.empty? # We don't support other options.
 
@@ -79,6 +80,8 @@ namespace :constraints do
           print_non_null(from_tbl, from_type_col)
 
           inverses = models.flat_map(&:reflect_on_all_associations).select do |a|
+            # TODO(zhangwen): Sometimes a polymorphic belongs_to doesn't have corresponding has_one or has_many's.
+            #   What to do in that case?  What if some of the has_one/has_many's are present but not all?
             has_macros.include?(a.macro) && a.options[:as] == association.name && a.klass == model
           end
           next if inverses.empty? # TODO(zhangwen): what's the deal with ActiveAdmin Comment?
