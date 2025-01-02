@@ -11,12 +11,11 @@ config_file="$HOME/dse/examples/theodinproject_sitemap_index.conf"
 for p in "$HOME"/dse/logs/theodinproject-*"$suffix"; do
     START=$(date +%s.%N)
 
-    paths_dir="$(realpath "$p/annotated-paths")"
-    analysis_dir="$(realpath "$p/analysis-$analysis_id")"
-    rm -f "$paths_dir/original-conditioned-queries.json"
+    analysis_dir="$p/analysis-$analysis_id"
+    rm -f "$analysis_dir/original-conditioned-queries.json"
     (cd "$HOME/dse/concolic_driver";
      sbt -mem 4096 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.GenerateConditionedQueries \
-      $config_file $paths_dir --analysis-dir $analysis_dir"
+      $config_file $p/annotated-paths --analysis-dir $analysis_dir"
     )
 
     (cd "$analysis_dir";
@@ -36,5 +35,5 @@ for p in "$HOME"/dse/logs/theodinproject-*"$suffix"; do
     DIFF=$(echo "$END - $START" | bc)
     echo "$DIFF" > "$analysis_dir/post-processing-time-sec.txt"
 
-    echo "Postprocessing complete.  Suffix: $suffix, analysis ID: $analysis_id." 1>&2
+    echo "Postprocessing complete.  Suffix: $suffix.  Analysis ID: $analysis_id." 1>&2
 done
