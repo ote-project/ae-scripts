@@ -15,7 +15,9 @@ for p in "$HOME"/dse/logs/theodinproject-*"$suffix"; do
     analysis_dir="$(realpath "$p/analysis-$analysis_id")"
     rm -f "$paths_dir/original-conditioned-queries.json"
     (cd "$HOME/dse/concolic_driver";
-     sbt -mem 4096 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.GenerateConditionedQueries $config_file $paths_dir --analysis-dir $analysis_dir")
+     sbt -mem 4096 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.GenerateConditionedQueries \
+      $config_file $paths_dir --analysis-dir $analysis_dir"
+    )
 
     (cd "$analysis_dir";
      if [ ! -f original-conditioned-queries.json ]; then
@@ -26,9 +28,13 @@ for p in "$HOME"/dse/logs/theodinproject-*"$suffix"; do
     )
 
     (cd "$HOME/dse/concolic_driver";
-     sbt -mem 4096 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ConvertToSqlViews $config_file $analysis_dir")
+     sbt -mem 4096 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ConvertToSqlViews \
+      $config_file $analysis_dir"
+    )
 
     END=$(date +%s.%N)
     DIFF=$(echo "$END - $START" | bc)
     echo "$DIFF" > "$analysis_dir/post-processing-time-sec.txt"
+
+    echo "Postprocessing complete.  Suffix: $suffix, analysis ID: $analysis_id." 1>&2
 done
