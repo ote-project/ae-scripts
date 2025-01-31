@@ -5,7 +5,7 @@ suffix=${1?param missing - suffix.}
 
 cd "$HOME/dse"
 (cd examples; git pull --ff-only)
-
+export DSE_INCLUDE_STACKTRACE=true
 cd "concolic_driver"
 sbt "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ExploreExecutions $HOME/dse/examples/autolab_courses_index.conf $HOME/dse/logs/autolab-courses-index-2r-$suffix --execution-logging=inputs-only"
 sbt "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ExploreExecutions $HOME/dse/examples/autolab_assessments_index.conf $HOME/dse/logs/autolab-assessments-index-2r-$suffix --execution-logging=inputs-only"
