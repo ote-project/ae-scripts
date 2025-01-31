@@ -3,20 +3,93 @@ import json
 import gzip
 import sys
 
-def get_stacktrace(transcript_file_name: str) -> list[tuple]:
+class PathObject(object):
+
+    def __init__(self, stacktrace):
+        self.pred = None # predecessor path object
+        self.succ = None # successor path object
+        self.stacktrace = stacktrace
+
+        self.lineno = None
+        self.file_path = None
+        self.func_name = None
+
+    def extract_fileline(self):
+        # This parses the lines of stacktrace in ruby, if we ever try
+        # different langauges than this might need to be changed
+        if not self.stacktrace:
+            return None
+        split = None
+        for l in self.stacktrace:
+            split = l.split(":")
+            if "record" not in split[2]:
+                break
+
+        self.file_path = split[-3]
+        self.lineno = int(split[-2])
+        self.func_name = split[-1].split("`")[1][:-1]
+
+class PCAtom(PathObject):
+
+    def __init__(self, cond, outcome, stacktrace):
+        PathObject.__init__(self, stacktrace)
+        self.cond = cond
+        self.outcome = outcome
+
+    def __str__(self):
+        return f"cond: {self.cond}; outcome: {self.outcome}"
+
+class QueryDecl(PathObject):
+
+    def __init__(self, qid, query, params, stacktrace):
+        PathObject.__init__(self, stacktrace)
+        self.qid = qid
+        self.query = query
+        self.params = params
+
+    def __str__(self):
+        return f"query: {self.query}; params: {self.params}"
+
+class QueryResRowDecl(PathObject):
+
+    def __init__(self):
+        pass # TODO(kerneyj): implement this for "sqlQueryResRowDecl" option in parse_element
+
+class QueryResEnd(PathObject):
+
+    def __init__(self):
+        pass # TODO(kerneyj): implement this for "sqlQueryResEnd" option in parse_element
+
+def parse_element(element: dict) -> PathObject:
+    assert len(element.keys()) == 1
+    key = list(element.keys())[0]
+    if key == "pcAtom":
+        return PCAtom(element[key]["cond"], element[key]["outcome"] if "outcome" in element[key] else None, element[key]["stacktrace"].split("\n"))
+    elif key == "sqlQueryDecl":
+        return QueryDecl(element[key]["qid"] if "qid" in element[key] else None, element[key]["query"], element[key]["params"], element[key]["stacktrace"].split("\n"))
+    elif key == "sqlQueryResRowDecl":
+        return;
+    elif key == "sqlQueryResEnd":
+        return;
+    else:
+        raise Exception(f"Found element type {key} that does not have an associated class\n{element[key].keys()}")
+
+def link_pathobjects(list):
+    # TODO(kerneyj): Wen mentioned that its a chain so just link them together
+    # before doing this will need to implement all the above PathObjects
+    pass
+
+def parse_transcript(transcript_file_name: str) -> list[PathObject]:
     ret = []
-    with gzip.open(transcript_file_name, mode="rt") as f:
+    with gzip.open(transcript_file_name, mode="r") as f:
         transcript_list = [json.loads(line) for line in f]
 
     for transcript in transcript_list:
-        assert "elements" in transcript # TODO(kerneyJ): make sure that elements is the only key in this dictionary
+        assert len(transcript.keys())
         elements = transcript["elements"]
         for element in elements:
-            assert len(element.keys()) == 1
-            key = list(element.keys())[0]
-            if "stacktrace" not in element[key]:
-                continue
-            ret.append((key, element[key]["stacktrace"].split("\n"))) # There is other information that I am not including here
+            pa = parse_element(element)
+            ret.append(pa)
 
     return ret
 
@@ -28,16 +101,24 @@ def filter_from(string: str, stacktrace: list[str]):
     # filters out paths that do contain substring string
     return [line for line in stacktrace if string.lower() not in line.lower()]
 
-def file_lookup(root: str, path):
-    pass
+def line_lookup(pa: PathObject, root_path: str, strip_from_path: int = 0):
+    # strip_from_path exists because the runs are in docker containers
+    # and thus the location of the libraries and run time is different
+    # so we will remove the first n characters from path string and
+    # 
+    file_path = pa.file_path[strip_from_path:]
+    path = root_path + file_path
+    with open(path, "r") as f:
+        lines = [line for line in f]
+    return lines[pa.lineno-1] # minus one because 0 base
 
 if __name__ == "__main__":
     # TODO(kerneyj): make this parse sys.argv
-    ret =get_stacktrace("/home/ubuntu/dse/logs/autolab-courses-index-2r-test_7/invocations/transcript-0.json.gz")
-    pair = ret[0]
-    # for pair in ret:
-    typ = pair[0]
-    trace = pair[1]
-    for line in filter_from("rspec", trace):
-        print(line)
-
+    ret = parse_transcript("/home/ubuntu/dse/logs/autolab-courses-index-2r-test_7/invocations/transcript-0.json.gz")
+    for pa in ret:
+        if not pa:
+            continue
+        pa.extract_fileline()
+        if "/opt" in pa.file_path:
+            line = line_lookup(pa, "/home/ubuntu/dse/", 4)
+        print(line, end="")
