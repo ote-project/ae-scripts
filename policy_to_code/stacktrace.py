@@ -14,20 +14,27 @@ class PathObject(object):
         self.file_path = None
         self.func_name = None
 
-    def extract_fileline(self):
+    def extract_fileline(self, application_name):
         # This parses the lines of stacktrace in ruby, if we ever try
         # different langauges than this might need to be changed
         if not self.stacktrace:
             return None
         split = None
+        found = False
         for l in self.stacktrace:
             split = l.split(":")
-            if "record" not in split[2]:
+            fp = split[-3]
+            # Look for a stacktrace line within the application
+            # that does not contain our code
+            if application_name in fp and "/dse" not in fp:
+                found = True
                 break
 
         self.file_path = split[-3]
         self.lineno = int(split[-2])
         self.func_name = split[-1].split("`")[1][:-1]
+        print(fp)
+        return found
 
 class PCAtom(PathObject):
 
@@ -50,6 +57,7 @@ class QueryDecl(PathObject):
     def __str__(self):
         return f"query: {self.query}; params: {self.params}"
 
+# These two classes I think are not needed
 class QueryResRowDecl(PathObject):
 
     def __init__(self):
@@ -105,7 +113,6 @@ def line_lookup(pa: PathObject, root_path: str, strip_from_path: int = 0):
     # strip_from_path exists because the runs are in docker containers
     # and thus the location of the libraries and run time is different
     # so we will remove the first n characters from path string and
-    # 
     file_path = pa.file_path[strip_from_path:]
     path = root_path + file_path
     with open(path, "r") as f:
@@ -118,7 +125,7 @@ if __name__ == "__main__":
     for pa in ret:
         if not pa:
             continue
-        pa.extract_fileline()
+        ret = pa.extract_fileline("Autolab")
         if "/opt" in pa.file_path:
             line = line_lookup(pa, "/home/ubuntu/dse/", 4)
-        print(line, end="")
+        print(line, end = '')
