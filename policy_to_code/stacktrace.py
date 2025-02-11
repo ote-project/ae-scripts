@@ -13,6 +13,7 @@ class PathObject(object):
         self.lineno = None
         self.file_path = None
         self.func_name = None
+        self.locs = []
 
     def extract_fileline(self, application_name):
         # This parses the lines of stacktrace in ruby, if we ever try
@@ -26,14 +27,14 @@ class PathObject(object):
             fp = split[-3]
             # Look for a stacktrace line within the application
             # that does not contain our code
-            if application_name in fp and "/dse" not in fp:
+            if application_name in fp and "/spec" not in fp:
                 found = True
-                break
+                self.locs.append((fp, split[-2]))
+                # break
 
         self.file_path = split[-3]
         self.lineno = int(split[-2])
         self.func_name = split[-1].split("`")[1][:-1]
-        print(fp)
         return found
 
 class PCAtom(PathObject):
@@ -89,8 +90,12 @@ def link_pathobjects(list):
 
 def parse_transcript(transcript_file_name: str) -> list[PathObject]:
     ret = []
-    with gzip.open(transcript_file_name, mode="r") as f:
-        transcript_list = [json.loads(line) for line in f]
+    if ".gz" in transcript_file_name:
+        with gzip.open(transcript_file_name, mode="r") as f:
+            transcript_list = [json.loads(line) for line in f]
+    else:
+        with open(transcript_file_name, mode="r") as f:
+            transcript_list = [json.loads(line) for line in f]
 
     for transcript in transcript_list:
         assert len(transcript.keys())
@@ -121,11 +126,33 @@ def line_lookup(pa: PathObject, root_path: str, strip_from_path: int = 0):
 
 if __name__ == "__main__":
     # TODO(kerneyj): make this parse sys.argv
-    ret = parse_transcript("/home/ubuntu/dse/logs/autolab-courses-index-2r-test_7/invocations/transcript-0.json.gz")
-    for pa in ret:
+    ret = parse_transcript("/home/ubuntu/dse/policy-extraction-scripts/policy_to_code/transcript-4893.json") # "/home/ubuntu/dse/logs/autolab-metrics-pending-2r-test_9/invocations/transcript-2.json.gz")
+    s = set()
+    for i, pa in enumerate(ret):
         if not pa:
             continue
-        ret = pa.extract_fileline("Autolab")
-        if "/opt" in pa.file_path:
-            line = line_lookup(pa, "/home/ubuntu/dse/", 4)
-        print(line, end = '')
+        pa.extract_fileline("Autolab")
+        for l in pa.locs:
+            s.add(l)
+        #if not pa.extract_fileline("Autolab"):
+        #    continue
+        # print(pa.file_path, pa.func_name, pa.lineno)
+
+        #print(f"{i}, {type(pa)}" + (100 * '-'))
+        #print(type(pa), pa.file_path)
+        #for l in pa.stacktrace:
+        #    print(l)
+        #print(100 * '-')
+
+        #if not isinstance(pa, QueryDecl):
+        #    continue
+        #if ret:
+        #    if "/opt" in pa.file_path:
+        #        line = line_lookup(pa, "/home/ubuntu/dse/", 4)
+        #        print(pa.lineno, line, end="")
+        #else:
+        #    print()
+
+    for l in s:
+        print(l)
+    print(f"Number of path objects {len(ret)}")
