@@ -124,13 +124,12 @@ def main():
         for future in tqdm(as_completed(future_to_qi), total=len(query_issuances)):
             try:
                 result = future.result()
-                json.dump(result, sys.stdout)
-                sys.stdout.write("\n")
+                print(json.dumps(result, ensure_ascii=False), flush=True)
             except Exception as e:
                 qi = future_to_qi[future]
                 print(f"Error processing query: {e}", file=sys.stderr)
                 # Output error result
-                json.dump({
+                print(json.dumps({
                     "query": qi.query,
                     "stacktrace": qi.stacktrace,
                     "error": str(e),
@@ -141,8 +140,7 @@ def main():
                     "tokens_used": None,
                     "dur_s": 0,
                     "exit_code": -1,
-                }, sys.stdout)
-                sys.stdout.write("\n")
+                }), flush=True)
 
 
 if __name__ == "__main__":
