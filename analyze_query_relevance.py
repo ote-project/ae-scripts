@@ -23,11 +23,14 @@ APP_DIR = "/home/ubuntu/dse/diaspora"
 CUTOFF_PATTERN = re.compile(r"/home/ubuntu/dse/diaspora/app/controllers/posts_controller\.rb:\d+:in `show'")
 
 PROMPT_TEMPLATE = """
-I am a program analysis tool that, given a Ruby on Rails application, performs **symbolic execution** to gather (1) all (parameterized) **SQL queries** that the application may issue, and (2) the conditions under which each SQL query is issued.
+I am a program analysis tool that, given a Ruby on Rails application, performs **symbolic execution** to gather:
+    (1) all (parameterized) **SQL queries** that the application may issue, and
+    (2) the conditions under which each SQL query is issued.
 
 During symbolic execution on the application in the current directory, I encountered a SQL query (enclosed in the <query></query> tags) issued at the the stacktrace enclosed in the <stacktrace></stacktrace> tags below.
 Normally, I would explore multiple possibilities for this query's result---whether it returns no rows, one row, etc.
-But if I know that this query's result has no bearing on **subsequent** SQL-query issuance, then I call this query _irrelevant_ and I can save time by going down only one path. Note that "subsequent SQL queries" may include queries issued outside the current method---e.g., if this query's result affects the method's return value, which affects whether or not the method's caller issues another SQL query, then this query _is_ relevant.
+But if I know that this query's result has no bearing on **subsequent** SQL-query issuance, then I call this query _irrelevant_ and I can save time by going down only one path.
+Note that "subsequent SQL queries" may include queries issued outside the current method---e.g., if this query's result affects the method's return value, which affects whether or not the method's caller issues another SQL query, then this query _is_ relevant.
 
 **Question: Is this query relevant---can it affect whether a later SQL query gets issued?**
 
@@ -39,7 +42,14 @@ But if I know that this query's result has no bearing on **subsequent** SQL-quer
 {stacktrace}
 </stacktrace>
 
-Inspect the code and **let me know whether this query is relevant**---i.e., affecting whether a later SQL query gets issued. Start your answer with "Yes", "No", or "Unsure", then explain your answer. Answer "Yes" or "No" only if you are certain. I don't want to accidentally skip over a query that is relevant, so err on the side of caution ("Unsure").
+Inspect the code and **let me know whether this query is relevant**---i.e., affecting whether a later SQL query gets issued---or tell me that you are unsure.
+
+Reminders:
+- I am asking **not** whether _this query_ is issued conditionally, but whether this query's result may affect the issuance of a **later SQL query**.
+- Err on the side of caution---I don't want to accidentally skip over a query that is relevant.
+
+Start your answer with the string "Relevant", "Irrelevant", or "Unsure" (this part will be parsed by a program, so don't change the format).
+Then explain your answer.
 """
 
 

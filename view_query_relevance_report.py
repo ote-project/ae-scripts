@@ -8,6 +8,8 @@ import pandas as pd
 import streamlit as st
 import sqlparse
 
+from analyze_query_relevance import PROMPT_TEMPLATE
+
 
 class Verdict(Enum):
     RELEVANT = "Relevant"
@@ -72,6 +74,14 @@ def get_verdict_markdown_badge(verdict: Verdict) -> str:
             return f":violet-badge[:material/help: Unsure]"
         case Verdict.UNKNOWN:
             return f":orange-badge[:material/help: Unknown]"
+
+
+def generate_prompt(query: str, stacktrace: list) -> str:
+    """Generate the prompt for a given query and stacktrace."""
+    return PROMPT_TEMPLATE.format(
+        query=query,
+        stacktrace="\n".join(stacktrace)
+    )
 
 
 # ---------- parse arguments --------------------------------------------------
@@ -154,7 +164,7 @@ def main() -> None:
                 st.write("**Exit code:**")
                 st.write(rec.get("exit_code", "—"))
 
-            tabs = st.tabs(["SQL", "Report", "Stack trace", "stdout", "stderr"])
+            tabs = st.tabs(["SQL", "Stack trace", "Report", "stdout", "stderr", "Copy prompt"])
             with tabs[0]:
                 st.code(
                     sqlparse.format(rec["query"], reindent=True, keyword_case="upper"),
@@ -162,15 +172,20 @@ def main() -> None:
                     line_numbers=True,
                 )
             with tabs[1]:
-                st.markdown(rec["last_message"])
-            with tabs[2]:
                 st.code("\n".join(rec["stacktrace"]), language="")
-            if rec.get("stdout"):
-                with tabs[3]:
-                    st.code(rec["stdout"])
-            if rec.get("stderr"):
-                with tabs[4]:
-                    st.code(rec["stderr"])
+            with tabs[2]:
+                st.markdown(rec["last_message"])
+            with tabs[3]:
+                st.code(rec["stdout"])
+            with tabs[4]:
+                st.code(rec["stderr"])
+            with tabs[5]:
+                st.warning(
+                    ":material/warning: The prompt shown below is constructed from the **current** template, "
+                    "which may have been updated since this record was generated."
+                )
+                prompt = generate_prompt(rec["query"], rec["stacktrace"])
+                st.code(prompt, language="text", line_numbers=True)
 
 
 if __name__ == "__main__":
