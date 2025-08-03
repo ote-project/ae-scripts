@@ -23,33 +23,29 @@ APP_DIR = "/home/ubuntu/dse/diaspora"
 CUTOFF_PATTERN = re.compile(r"/home/ubuntu/dse/diaspora/app/controllers/posts_controller\.rb:\d+:in `show'")
 
 PROMPT_TEMPLATE = """
-I am a program analysis tool that, given a Ruby on Rails application, performs **symbolic execution** to gather:
-    (1) all (parameterized) **SQL queries** that the application may issue, and
-    (2) the conditions under which each SQL query is issued.
+## Instructions
+You are being called by a program analysis tool that, given a Ruby on Rails application, performs symbolic execution to gather all (parameterized) **SQL queries** that the application may issue, and the conditions under which each SQL query is issued.
 
-During symbolic execution on the application in the current directory, I encountered a SQL query (enclosed in the <query></query> tags) issued at the the stacktrace enclosed in the <stacktrace></stacktrace> tags below.
-Normally, I would explore multiple possibilities for this query's result---whether it returns no rows, one row, etc.
-But if I know that this query's result has no bearing on **subsequent** SQL-query issuance, then I call this query _irrelevant_ and I can save time by going down only one path.
-Note that "subsequent SQL queries" may include queries issued outside the current method---e.g., if this query's result affects the method's return value, which affects whether or not the method's caller issues another SQL query, then this query _is_ relevant.
+During symbolic execution on the application in the current directory, the tool encountered a SQL query (in the Query section below) issued at the the stacktrace enclosed in the Stacktrace section below. The tool is asking you whether this query is relevant---can it possibly affect whether a **later SQL query** gets issued?
 
-**Question: Is this query relevant---can it affect whether a later SQL query gets issued?**
+A query is "Relevant" if its result may affect the issuance of a **later SQL query**, and is "Irrelevant" otherwise.
+Note that a "later SQL query" may be a query issued outside the current method---e.g., if this query's result affects the method's return value, which affects whether or not the method's caller issues another SQL query, then this query _is_ relevant.
 
-<query>
+## Query
+```sql
 {query}
-</query>
+```
 
-<stacktrace>
+## Stacktrace
+```
 {stacktrace}
-</stacktrace>
+```
 
-Inspect the code and **let me know whether this query is relevant**---i.e., affecting whether a later SQL query gets issued---or tell me that you are unsure.
-
-Reminders:
-- I am asking **not** whether _this query_ is issued conditionally, but whether this query's result may affect the issuance of a **later SQL query**.
-- Err on the side of caution---I don't want to accidentally skip over a query that is relevant.
-
-Start your answer with the string "Relevant", "Irrelevant", or "Unsure" (this part will be parsed by a program, so don't change the format).
-Then explain your answer.
+## Reminders
+- Inspect the code and **answer whether this query is relevant**---i.e., affecting whether a later SQL query gets issued---or answer that you are unsure.
+- You are asked **not** whether _this query_ is issued conditionally, but whether this query's result may affect the issuance of a **later SQL query**.
+- You must start your answer with the string "Relevant", "Irrelevant", or "Unsure"; this part will be parsed by a program, so you must not change the format.  Then, you must explain your answer.
+- You must err on the side of caution. The worst-case scenario is that you mark a query as irrelevant when it is relevant.
 """
 
 
