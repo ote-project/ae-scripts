@@ -23,29 +23,39 @@ APP_DIR = "/home/ubuntu/dse/diaspora"
 CUTOFF_PATTERN = re.compile(r"/home/ubuntu/dse/diaspora/app/controllers/posts_controller\.rb:\d+:in `show'")
 
 PROMPT_TEMPLATE = """
-## Instructions
-You are being called by a program analysis tool that, given a Ruby on Rails application, performs symbolic execution to gather all (parameterized) **SQL queries** that the application may issue, and the conditions under which each SQL query is issued.
+<instructions>
+You are being called by a program analysis tool called Ote that, given a Ruby on Rails application, performs symbolic execution to gather all (parameterized) **SQL queries** that the application may issue, and the conditions under which each SQL query is issued.
 
-During symbolic execution on the application in the current directory, the tool encountered a SQL query (in the Query section below) issued at the the stacktrace enclosed in the Stacktrace section below. The tool is asking you whether this query is relevant---can it possibly affect whether a **later SQL query** gets issued?
+During symbolic execution on the application in the current directory, Ote encountered a SQL query (in the <query> tags below) issued at the the stacktrace enclosed in the <stacktrace> tags below.
+Normally, Ote would explore multiple possibilities for this query's result---whether it returns no rows, one row, etc.
+But if this query's result has no bearing on **subsequent** SQL-query issuance, then this query is called _irrelevant_ and Ote can save time by going down only one path.
+Note that "subsequent SQL queries" may include queries issued outside the current method---e.g., if this query's result affects the method's return value, which affects whether or not the method's caller issues another SQL query, then this query _is_ relevant.
 
-A query is "Relevant" if its result may affect the issuance of a **later SQL query**, and is "Irrelevant" otherwise.
-Note that a "later SQL query" may be a query issued outside the current method---e.g., if this query's result affects the method's return value, which affects whether or not the method's caller issues another SQL query, then this query _is_ relevant.
+**Answer this question**: Is this query is relevant---can it possibly affect whether a subsequent SQL query gets issued?
+</instructions>
 
-## Query
-```sql
+<query>
 {query}
-```
+</query>
 
-## Stacktrace
-```
+<stacktrace>
 {stacktrace}
-```
+</stacktrace>
 
-## Reminders
-- Inspect the code and **answer whether this query is relevant**---i.e., affecting whether a later SQL query gets issued---or answer that you are unsure.
-- You are asked **not** whether _this query_ is issued conditionally, but whether this query's result may affect the issuance of a **later SQL query**.
-- You must start your answer with the string "Relevant", "Irrelevant", or "Unsure"; this part will be parsed by a program, so you must not change the format.  Then, you must explain your answer.
-- You must err on the side of caution. The worst-case scenario is that you mark a query as irrelevant when it is relevant.
+<reminders>
+- You are asked **not** whether _this query_ is issued conditionally, but whether this query's result may affect the issuance of a **subsequent SQL query**.
+- "Subsequent SQL queries" includes not only explicit manual queries from application code, but also any hidden ORM-driven calls (association preloads, default scopes, serializers, etc.).
+  - Even if the application code doesn't explicitly branch on the result, note that returning zero rows can suppress association-loading queries---this zero-vs-nonzero outcome is itself a branching point you must consider.
+  - If an ORM call could trigger additional SQL depending on whether the result set is empty or not, mark it as RELEVANT.
+  - To reason about this, you may want to identify _the exact expression_ in the code that triggered this SQL query, and then inspect any subsequent uses of that expression.
+- You MUST err on the side of caution. The worst-case scenario is marking a query as IRRELEVANT when it is actually RELEVANT---this could cause Ote to miss important execution paths.
+</reminders>
+
+<output-format>
+- **Answer whether this query is relevant**---i.e., affecting whether a subsequent SQL query gets issued---or answer that you are unsure.
+- You MUST start your answer with the string `RELEVANT`, `IRRELEVANT`, or `UNSURE`; this part will be parsed by a program, so you must not change the format.
+- Then, you must explain your verdict. If your verdict is `RELEVANT`, be specific about **what data** is subsequently fetched depending on this query's result and **how**.
+</output-format>
 """
 
 
@@ -92,12 +102,12 @@ def main():
             last_message = last_message_path.read_text()
             
             # Set verdict based on the start of last_message
-            if last_message.startswith("Yes"):
-                verdict = "Yes"
-            elif last_message.startswith("No"):
-                verdict = "No"
-            elif last_message.startswith("Unsure"):
-                verdict = "Unsure"
+            if last_message.startswith("RELEVANT"):
+                verdict = "RELEVANT"
+            elif last_message.startswith("IRRELEVANT"):
+                verdict = "IRRELEVANT"
+            elif last_message.startswith("UNSURE"):
+                verdict = "UNSURE"
             else:
                 verdict = None
 
