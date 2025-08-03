@@ -6,6 +6,7 @@ import re
 import subprocess
 import sys
 from timeit import default_timer as timer
+import time
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -18,6 +19,9 @@ class QueryIssuance:
     stacktrace: tuple[str, ...]
 
 MAX_WORKERS = 8
+TIMEOUT_SEC = 180
+MAX_RETRIES = 3
+RETRY_BACKOFF = 5
 
 APP_DIR = "/home/ubuntu/dse/diaspora"
 CUTOFF_PATTERN = re.compile(r"/home/ubuntu/dse/diaspora/app/controllers/posts_controller\.rb:\d+:in `show'")
@@ -86,18 +90,30 @@ def main():
             last_message_path = Path(temp_file.name)
         
         try:
-            start_ts = timer()
-            proc = subprocess.Popen(
-                ["codex", "exec", "--sandbox", "read-only", "--output-last-message", str(last_message_path)],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                cwd=APP_DIR
-            )
-            stdout, stderr = proc.communicate(prompt)
-            exit_code = proc.returncode
-            dur_s = timer() - start_ts
+            attempt = 0
+            while True:
+                attempt += 1
+                start_ts = timer()
+                try:
+                    proc = subprocess.Popen(
+                        ["codex", "exec", "--sandbox", "read-only", "--output-last-message", str(last_message_path)],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        cwd=APP_DIR
+                    )
+                    stdout, stderr = proc.communicate(prompt, timeout=TIMEOUT_SEC)
+                    exit_code = proc.returncode
+                    dur_s = timer() - start_ts
+                    break
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    stdout, stderr = proc.communicate()
+                    dur_s = timer() - start_ts
+                    if attempt >= MAX_RETRIES:
+                        raise
+                    time.sleep(RETRY_BACKOFF * attempt)
 
             last_message = last_message_path.read_text()
             
