@@ -46,19 +46,24 @@ Note that "subsequent SQL queries" may include queries issued outside the curren
 {stacktrace}
 </stacktrace>
 
-<reminders>
+<requirements>
 - You are asked **not** whether _this query_ is issued conditionally, but whether this query's result may affect the issuance of a **subsequent SQL query**.
 - "Subsequent SQL queries" includes not only explicit manual queries from application code, but also any hidden ORM-driven calls (association preloads, default scopes, serializers, etc.).
   - Even if the application code doesn't explicitly branch on the result, note that returning zero rows can suppress association-loading queries---this zero-vs-nonzero outcome is itself a branching point you must consider.
   - If an ORM call could trigger additional SQL depending on whether the result set is empty or not, mark it as RELEVANT.
-  - To reason about this, you may want to identify _the exact expression_ in the code that triggered this SQL query, and then inspect any subsequent uses of that expression.
+  - To reason about this, you should identify _the exact expression_ in the code that triggered this SQL query, and then inspect any subsequent uses of that expression.
 - You MUST err on the side of caution. The worst-case scenario is marking a query as IRRELEVANT when it is actually RELEVANT---this could cause Ote to miss important execution paths.
-</reminders>
+</requirements>
 
 <output-format>
 - **Answer whether this query is relevant**---i.e., affecting whether a subsequent SQL query gets issued---or answer that you are unsure.
 - You MUST start your answer with the string `RELEVANT`, `IRRELEVANT`, or `UNSURE`; this part will be parsed by a program, so you must not change the format.
-- Then, you must explain your verdict. If your verdict is `RELEVANT`, be specific about **what data** is subsequently fetched depending on this query's result and **how**.
+- Then, unless you answered `UNSURE`, you MUST rigorously  explain your verdict:
+  - You will be graded on your explanation. You MUST ensure that a human developer, by reading your explanation and cross-referencing the codebase, will be convinced of your verdict.
+  - Where applicable, you MUST identify the **precise expression $E$** in the code that represents the result of this SQL query. DO NOT just reproduce an entire line of code; focus on the relevant expression.
+    - If there is no explicit expression for the query's result at query time (e.g., because the query is eager-loading an association), you MUST identify the **precise code snippet** that triggered this SQL query.
+  - If your verdict is `RELEVANT`, you MUST be specific about **what data** is subsequently fetched depending on this query's result and **how**.
+  - If your verdict is `IRRELEVANT` and an expression $E$ exists, you MUST carefully go through subsequent uses of $E$ in the code and explain why they do not trigger SQL queries depending on the current query's outcome.
 </output-format>
 """
 

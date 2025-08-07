@@ -1,14 +1,19 @@
 import argparse
 import collections
-import json
-from typing import Iterable, Dict, Any
 from enum import Enum
+import json
+import re
+from typing import Iterable, Dict, Any
 
 import pandas as pd
-import streamlit as st
 import sqlparse
+import streamlit as st
 
 from analyze_query_relevance import PROMPT_TEMPLATE
+
+
+def strip_leading_non_alnum(s):
+    return re.sub(r'^[^a-zA-Z0-9]+', '', s)
 
 
 class Verdict(Enum):
@@ -24,9 +29,9 @@ class Verdict(Enum):
             return Verdict.UNKNOWN
 
         match verdict.lower():
-            case "yes":
+            case "yes" | "relevant":
                 return Verdict.RELEVANT
-            case "no":
+            case "no" | "irrelevant":
                 return Verdict.IRRELEVANT
             case "unsure":
                 return Verdict.UNSURE
@@ -84,14 +89,55 @@ def generate_prompt(query: str, stacktrace: list) -> str:
     )
 
 
-# ---------- parse arguments --------------------------------------------------
 def parse_args():
     parser = argparse.ArgumentParser(description="View query relevance report from JSONL file")
     parser.add_argument("input_file", help="Path to the JSONL file to read")
     return parser.parse_args()
 
 
-# ---------- load data -------------------------------------------------------
+def compute_verdict(rec: dict) -> Verdict:
+    """
+    Determine the verdict for a given record.
+
+    This function attempts to extract a verdict from the record dictionary `rec`.
+    It first checks if the "verdict" field is present and, if so, converts it to a `Verdict` enum.
+    If not, it looks for a "last_message" field and parses its lines to find a verdict
+    by checking for lines that start with "RELEVANT", "IRRELEVANT", or "UNSURE".
+    If multiple conflicting verdicts are found in the message, or if no verdict can be determined,
+    it returns `Verdict.UNKNOWN`.
+
+    Args:
+        rec (dict): The record containing verdict information.
+
+    Returns:
+        Verdict: The determined verdict as a `Verdict` enum.
+    """
+    if (verdict_str := rec.get("verdict")) is not None:
+        return Verdict.of(verdict_str)
+    
+    if (last_message := rec.get("last_message")) is None:
+        return Verdict.UNKNOWN
+    
+    final_verdict = Verdict.UNKNOWN
+    for line in last_message.splitlines():
+        line = strip_leading_non_alnum(line)
+        this_verdict = Verdict.UNKNOWN
+        if line.startswith("RELEVANT"):
+            this_verdict = Verdict.RELEVANT
+        elif line.startswith("IRRELEVANT"):
+            this_verdict = Verdict.IRRELEVANT
+        elif line.startswith("UNSURE"):
+            this_verdict = Verdict.UNSURE
+
+        if this_verdict != Verdict.UNKNOWN:
+            if final_verdict == Verdict.UNKNOWN:
+                final_verdict = this_verdict
+            elif final_verdict != this_verdict:
+                # Multiple verdicts found.
+                return Verdict.UNKNOWN
+
+    return final_verdict
+
 def main() -> None:
     args = parse_args()
 
@@ -111,7 +157,7 @@ def main() -> None:
 
     # Normalize verdicts.
     for rec in records:
-        rec["verdict"] = Verdict.of(rec.get("verdict"))
+        rec["verdict"] = compute_verdict(rec)
 
     # ---------- page layout -----------------------------------------------------
     st.set_page_config(page_title="Query Results Viewer", layout="wide")
