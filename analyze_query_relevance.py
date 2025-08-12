@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
+import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
-from timeit import default_timer as timer
-import time
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
+from timeit import default_timer as timer
 
 from tqdm import tqdm
 
@@ -18,7 +19,6 @@ class QueryIssuance:
     query: str
     stacktrace: tuple[str, ...]
 
-MAX_WORKERS = 8
 TIMEOUT_SEC = 180
 MAX_RETRIES = 3
 RETRY_BACKOFF = 5
@@ -68,7 +68,26 @@ Note that "subsequent SQL queries" may include queries issued outside the curren
 """
 
 
+def positive_int(value: str) -> int:
+    try:
+        ivalue = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--max-workers must be an integer")
+    if ivalue <= 0:
+        raise argparse.ArgumentTypeError("--max-workers must be a positive integer")
+    return ivalue
+
+
 def main():
+    parser = argparse.ArgumentParser(description="Analyze query relevance in parallel")
+    parser.add_argument(
+        "--max-workers",
+        type=positive_int,
+        default=8,
+        help="Maximum number of parallel workers (positive integer, default: 8)",
+    )
+    args = parser.parse_args()
+
     data = json.load(sys.stdin)
     query_issuances = set()
     for item in data:
@@ -152,7 +171,7 @@ def main():
             last_message_path.unlink(missing_ok=True)
 
     # Use ThreadPoolExecutor to parallelize processing
-    max_workers = min(MAX_WORKERS, len(query_issuances))
+    max_workers = min(args.max_workers, len(query_issuances))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all tasks
         future_to_qi = {executor.submit(process_query_issuance, qi): qi for qi in query_issuances}
