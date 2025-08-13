@@ -52,6 +52,7 @@ Note that "subsequent SQL queries" may include queries issued outside the curren
   - Even if the application code doesn't explicitly branch on the result, note that returning zero rows can suppress association-loading queries---this zero-vs-nonzero outcome is itself a branching point you must consider.
   - If an ORM call could trigger additional SQL depending on whether the result set is empty or not, mark it as RELEVANT.
   - To reason about this, you should identify _the exact expression_ in the code that triggered this SQL query, and then inspect any subsequent uses of that expression.
+- Assume invariants enforced by model validations/associations/database constraints hold. You NEED NOT consider the case where invariants are violated by the database.
 - You MUST err on the side of caution. The worst-case scenario is marking a query as IRRELEVANT when it is actually RELEVANT---this could cause Ote to miss important execution paths.
 </requirements>
 
