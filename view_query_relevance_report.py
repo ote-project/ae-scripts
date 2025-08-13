@@ -3,6 +3,7 @@ import collections
 from enum import Enum
 import json
 import re
+import html
 from typing import Iterable, Dict, Any
 
 import pandas as pd
@@ -218,7 +219,19 @@ def main() -> None:
                     line_numbers=True,
                 )
             with tabs[1]:
-                st.code("\n".join(rec["stacktrace"]), language="")
+                # Render stacktrace in a scrollable, fixed-height mono box with per-frame lines
+                safe_lines = [html.escape(frame) for frame in rec["stacktrace"]]
+                html_lines = "<br/>".join(safe_lines)
+                st.markdown(
+                    (
+                        "<div style='max-height: 320px; overflow-y: auto; border: 1px solid #ddd; "
+                        "border-radius: 4px; padding: 8px;'>"
+                        "<code style='display:block; white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;'>"
+                        f"{html_lines}"
+                        "</code></div>"
+                    ),
+                    unsafe_allow_html=True,
+                )
             with tabs[2]:
                 st.markdown(rec["last_message"])
             with tabs[3]:
