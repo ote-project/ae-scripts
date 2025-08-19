@@ -1,10 +1,9 @@
 import argparse
 import collections
-from enum import Enum
 import json
 import re
-import html
-from typing import Iterable, Dict, Any
+from enum import Enum
+from typing import Any, Iterable
 
 import pandas as pd
 import sqlparse
@@ -41,7 +40,7 @@ class Verdict(Enum):
 
 
 # ---------- helpers ---------------------------------------------------------
-def read_jsonl(fp) -> Iterable[Dict[str, Any]]:
+def read_jsonl(fp) -> Iterable[dict[str, Any]]:
     """Yield one dict per non-blank line read from the file-like object `fp`."""
     for line in fp:
         line = line.strip()
@@ -54,6 +53,14 @@ def preview(text: str | None, length: int = 80) -> str:
     if text is None:
         return ""
     return text if len(text) <= length else text[: length - 1] + "…"
+
+
+def compute_tokens_used_from_stdout(stdout: str | None) -> int | None:
+    """Extract the last "tokens used: N" occurrence from stdout, if present."""
+    if not stdout:
+        return None
+    matches = re.findall(r"tokens used: (\d+)", stdout)
+    return int(matches[-1]) if matches else None
 
 
 def get_verdict_badge_emoji(verdict: Verdict) -> str:
@@ -98,46 +105,22 @@ def parse_args():
 
 def compute_verdict(rec: dict) -> Verdict:
     """
-    Determine the verdict for a given record.
-
-    This function attempts to extract a verdict from the record dictionary `rec`.
-    It first checks if the "verdict" field is present and, if so, converts it to a `Verdict` enum.
-    If not, it looks for a "last_message" field and parses its lines to find a verdict
-    by checking for lines that start with "RELEVANT", "IRRELEVANT", or "UNSURE".
-    If multiple conflicting verdicts are found in the message, or if no verdict can be determined,
-    it returns `Verdict.UNKNOWN`.
-
-    Args:
-        rec (dict): The record containing verdict information.
-
-    Returns:
-        Verdict: The determined verdict as a `Verdict` enum.
+    Determine the verdict for a given record, computing one if not present.
     """
     if (verdict_str := rec.get("verdict")) is not None:
         return Verdict.of(verdict_str)
     
     if (last_message := rec.get("last_message")) is None:
         return Verdict.UNKNOWN
-    
-    final_verdict = Verdict.UNKNOWN
-    for line in last_message.splitlines():
-        line = strip_leading_non_alnum(line)
-        this_verdict = Verdict.UNKNOWN
-        if line.startswith("RELEVANT"):
-            this_verdict = Verdict.RELEVANT
-        elif line.startswith("IRRELEVANT"):
-            this_verdict = Verdict.IRRELEVANT
-        elif line.startswith("UNSURE"):
-            this_verdict = Verdict.UNSURE
 
-        if this_verdict != Verdict.UNKNOWN:
-            if final_verdict == Verdict.UNKNOWN:
-                final_verdict = this_verdict
-            elif final_verdict != this_verdict:
-                # Multiple verdicts found.
-                return Verdict.UNKNOWN
+    if last_message.startswith("RELEVANT"):
+        return Verdict.RELEVANT
+    elif last_message.startswith("IRRELEVANT"):
+        return Verdict.IRRELEVANT
+    elif last_message.startswith("UNSURE"):
+        return Verdict.UNSURE
 
-    return final_verdict
+    return Verdict.UNKNOWN
 
 def main() -> None:
     args = parse_args()
@@ -156,9 +139,11 @@ def main() -> None:
         st.warning(f"No records were found in {args.input_file}")
         st.stop()
 
-    # Normalize verdicts.
+    # Normalize verdicts and tokens.
     for rec in records:
         rec["verdict"] = compute_verdict(rec)
+        if "tokens_used" not in rec:
+            rec["tokens_used"] = compute_tokens_used_from_stdout(rec.get("stdout"))
 
     # ---------- page layout -----------------------------------------------------
     st.set_page_config(page_title="Query Results Viewer", layout="wide")
@@ -220,17 +205,10 @@ def main() -> None:
                 )
             with tabs[1]:
                 # Render stacktrace in a scrollable, fixed-height mono box with per-frame lines
-                safe_lines = [html.escape(frame) for frame in rec["stacktrace"]]
-                html_lines = "<br/>".join(safe_lines)
-                st.markdown(
-                    (
-                        "<div style='max-height: 320px; overflow-y: auto; border: 1px solid #ddd; "
-                        "border-radius: 4px; padding: 8px;'>"
-                        "<code style='display:block; white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;'>"
-                        f"{html_lines}"
-                        "</code></div>"
-                    ),
-                    unsafe_allow_html=True,
+                st.code(
+                    "\n".join(rec["stacktrace"]),
+                    language="text",
+                    line_numbers=True,
                 )
             with tabs[2]:
                 st.markdown(rec["last_message"])
