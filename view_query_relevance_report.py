@@ -12,10 +12,6 @@ import streamlit as st
 from analyze_query_relevance import PROMPT_TEMPLATE
 
 
-def strip_leading_non_alnum(s):
-    return re.sub(r'^[^a-zA-Z0-9]+', '', s)
-
-
 class Verdict(Enum):
     RELEVANT = "Relevant"
     IRRELEVANT = "Irrelevant"
@@ -150,23 +146,46 @@ def main() -> None:
     st.title("Query Results Viewer")
     st.caption(f"Loaded **{len(records)}** record(s) from {args.input_file}.")
 
+    # ----- filtering -----------------------------------------------------------
+    with st.sidebar:
+        st.subheader("Filters")
+        query_filter = st.text_input(
+            "Query contains",
+            value="",
+            help="Show only records whose SQL query contains this text (case-insensitive).",
+        ).strip()
+
+    # Apply query string filter (case-insensitive substring)
+    if query_filter:
+        filtered_records = [
+            r for r in records if query_filter.lower() in (r.get("query", "").lower())
+        ]
+    else:
+        filtered_records = records
+
     st.subheader("Summary")
 
     # Top-level metrics summary
-    counts = collections.Counter(r["verdict"] for r in records)
+    counts = collections.Counter(r["verdict"] for r in filtered_records)
     for col, verdict in zip(st.columns(4), (Verdict.RELEVANT, Verdict.IRRELEVANT, Verdict.UNSURE, Verdict.UNKNOWN)):
         col.metric(get_verdict_markdown_badge(verdict), counts.get(verdict, 0))
 
     # ---------- summary table ---------------------------------------------------
     summary_df = pd.DataFrame(
         {
-            "Query": [preview(r["query"], 120) for r in records],
-            "Verdict": [get_verdict_badge_emoji(r.get("verdict")) for r in records],
-            "Duration (s)": [r.get("dur_s") for r in records],
-            "Tokens used": [r.get("tokens_used") for r in records],
-            "Exit code": [r.get("exit_code") for r in records],
+            "Query": [preview(r["query"], 120) for r in filtered_records],
+            "Verdict": [get_verdict_badge_emoji(r.get("verdict")) for r in filtered_records],
+            "Duration (s)": [r.get("dur_s") for r in filtered_records],
+            "Tokens used": [r.get("tokens_used") for r in filtered_records],
+            "Exit code": [r.get("exit_code") for r in filtered_records],
         }
     )
+
+    # Indicate filtering status
+    if query_filter:
+        st.caption(
+            f"Showing {len(filtered_records)} of {len(records)} record(s) matching: '{query_filter}'"
+        )
 
     st.dataframe(summary_df, height=min(400, 40 + 35 * len(summary_df)), use_container_width=True)
 
@@ -175,8 +194,9 @@ def main() -> None:
     # ---------- detailed, expandable view --------------------------------------
     st.subheader("Detailed records")
 
-    for idx, rec in enumerate(records):
-        with st.expander(f"**Record #{idx}:** {preview(rec['query'], 120)}"):
+    for idx, rec in enumerate(filtered_records):
+        query_preview = preview(rec['query'], 120)
+        with st.expander(f"**Record #{idx}:** {get_verdict_markdown_badge(rec.get('verdict'))} `` {query_preview} ``"):
             # Core metadata columns
             col1, col2, col3, col4 = st.columns(4)
 
@@ -196,7 +216,13 @@ def main() -> None:
                 st.write("**Exit code:**")
                 st.write(rec.get("exit_code", "—"))
 
-            tabs = st.tabs(["SQL", "Stack trace", "Report", "stdout", "stderr", "Copy prompt"])
+            # Determine tabs based on whether original prompt exists
+            tab_names = ["SQL", "Stack trace", "Report", "stdout", "stderr"]
+            if rec.get("prompt"):
+                tab_names.append("Original prompt")
+            tab_names.append("Copy current prompt")
+            
+            tabs = st.tabs(tab_names)
             with tabs[0]:
                 st.code(
                     sqlparse.format(rec["query"], reindent=True, keyword_case="upper"),
@@ -216,10 +242,21 @@ def main() -> None:
                 st.code(rec["stdout"])
             with tabs[4]:
                 st.code(rec["stderr"])
-            with tabs[5]:
+            
+            # Original prompt tab (if it exists)
+            tab_idx = 5
+            if rec.get("prompt"):
+                with tabs[tab_idx]:
+                    st.info(":material/info: This is the original prompt that was used to generate this record.")
+                    st.code(rec["prompt"], language="text", line_numbers=True)
+                tab_idx += 1
+            
+            # Copy prompt tab (always last)
+            with tabs[tab_idx]:
                 st.warning(
                     ":material/warning: The prompt shown below is constructed from the **current** template, "
-                    "which may have been updated since this record was generated."
+                    "not the original prompt that was used to generate this record. "
+                    "Use this to test the current template with the same query and stacktrace."
                 )
                 prompt = generate_prompt(rec["query"], rec["stacktrace"])
                 st.code(prompt, language="text", line_numbers=True)
