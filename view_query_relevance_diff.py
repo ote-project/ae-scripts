@@ -5,8 +5,9 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, Any, Tuple
 
 import streamlit as st
-import html
 import sqlparse
+import pandas as pd
+import numpy as np
 
 # Reuse helpers and enums from the existing viewer to keep consistency.
 from view_query_relevance_report import (
@@ -89,6 +90,10 @@ def main() -> None:
     right_keys = set(right_idx.keys())
     common_keys = left_keys & right_keys
 
+    # We'll compute performance (speedups) after reading any filters
+    # so that the chart respects the current filter.
+    speedups: list[float] = []
+
     # Only show pairs with different verdicts
     diffs = []
     change_counter = collections.Counter()
@@ -122,88 +127,237 @@ def main() -> None:
         if search:
             diffs = [t for t in diffs if search.lower() in t[0].query.lower()]
 
-    st.subheader("Changed verdicts")
+    # Recompute performance metrics (speedups) from filtered keys
+    # Speedup S = left_time / right_time (>1 means faster, <1 means slower)
+    if search:
+        filtered_keys_for_perf = [k for k in common_keys if search.lower() in k.query.lower()]
+    else:
+        filtered_keys_for_perf = list(common_keys)
+
+    for k in filtered_keys_for_perf:
+        lrec = left_idx[k]
+        rrec = right_idx[k]
+        left_dur = lrec.get("dur_s")
+        right_dur = rrec.get("dur_s")
+        if (
+            isinstance(left_dur, (int, float))
+            and isinstance(right_dur, (int, float))
+            and left_dur > 0
+            and right_dur > 0
+        ):
+            speedup = left_dur / right_dur
+            speedups.append(speedup)
+
+    st.subheader("Changed Verdicts")
     if not diffs:
         st.info("No verdict differences found.")
-        st.stop()
+    else:
+        # Quick list of change counts
+        if change_counter:
+            st.write("Change summary:")
+            cols = st.columns(min(4, len(change_counter)))
+            for (i, ((lv, rv), count)) in enumerate(change_counter.most_common()):
+                with cols[i % len(cols)]:
+                    st.metric(make_change_label(lv, rv), count)
 
-    # Quick list of change counts
-    if change_counter:
-        st.write("Change summary:")
-        cols = st.columns(min(4, len(change_counter)))
-        for (i, ((lv, rv), count)) in enumerate(change_counter.most_common()):
-            with cols[i % len(cols)]:
-                st.metric(make_change_label(lv, rv), count)
+        st.divider()
 
-    st.divider()
+        # Detailed view per diff
+        for i, (k, lrec, rrec) in enumerate(diffs, start=1):
+            header = f"#{i}: {preview(k.query, 120)}"
+            with st.expander(header):
+                # Verdicts and core metadata
+                lc, rc = st.columns(2)
+                with lc:
+                    st.write("**Left verdict:**")
+                    st.markdown(get_verdict_markdown_badge(lrec.get("verdict", Verdict.UNKNOWN)))
+                with rc:
+                    st.write("**Right verdict:**")
+                    st.markdown(get_verdict_markdown_badge(rrec.get("verdict", Verdict.UNKNOWN)))
 
-    # Detailed view per diff
-    for i, (k, lrec, rrec) in enumerate(diffs, start=1):
-        header = f"#{i}: {preview(k.query, 120)}"
-        with st.expander(header):
-            # Verdicts and core metadata
-            lc, rc = st.columns(2)
-            with lc:
-                st.write("**Left verdict:**")
-                st.markdown(get_verdict_markdown_badge(lrec.get("verdict", Verdict.UNKNOWN)))
-            with rc:
-                st.write("**Right verdict:**")
-                st.markdown(get_verdict_markdown_badge(rrec.get("verdict", Verdict.UNKNOWN)))
+                st.write("**Query**")
+                st.code(sqlparse.format(k.query, reindent=True, keyword_case="upper"), language="sql")
 
-            st.write("**Query**")
-            st.code(sqlparse.format(k.query, reindent=True, keyword_case="upper"), language="sql")
+                st.write("**Stack trace**")
+                # Render a scrollable code-like box for long traces, preserving per-frame lines
+                st.code(
+                    "\n".join(k.stacktrace),
+                    language="text",
+                    line_numbers=True,
+                )
 
-            st.write("**Stack trace**")
-            # Render a scrollable code-like box for long traces, preserving per-frame lines
-            safe_lines = [html.escape(frame) for frame in k.stacktrace]
-            html_lines = "<br/>".join(safe_lines)
-            st.markdown(
-                (
-                    "<div style='max-height: 320px; overflow-y: auto; border: 1px solid #ddd; "
-                    "border-radius: 4px; padding: 8px;'>"
-                    "<code style='display:block; white-space: pre; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, monospace;'>"
-                    f"{html_lines}"
-                    "</code></div>"
-                ),
-                unsafe_allow_html=True,
+                tabs = st.tabs(["Report", "stdout", "stderr", "Copy prompt"]) 
+                # Reports side-by-side
+                with tabs[0]:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.caption("Left: report")
+                        st.markdown(lrec.get("last_message", ""))
+                    with c2:
+                        st.caption("Right: report")
+                        st.markdown(rrec.get("last_message", ""))
+
+                with tabs[1]:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.caption("Left: stdout")
+                        st.code(lrec.get("stdout", ""))
+                    with c2:
+                        st.caption("Right: stdout")
+                        st.code(rrec.get("stdout", ""))
+
+                with tabs[2]:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.caption("Left: stderr")
+                        st.code(lrec.get("stderr", ""))
+                    with c2:
+                        st.caption("Right: stderr")
+                        st.code(rrec.get("stderr", ""))
+
+                with tabs[3]:
+                    st.warning(
+                        ":material/warning: The prompt shown below is constructed from the **current** template, "
+                        "which may have been updated since these records were generated."
+                    )
+                    prompt = generate_prompt(k.query, k.stacktrace)
+                    st.code(prompt, language="text", line_numbers=True)
+
+    # Performance comparison (moved after Changed verdicts)
+    if speedups:
+        st.subheader("Performance Comparison")
+        # Indicate that performance is filtered when a search is active
+        if search:
+            st.caption(
+                f"Performance metrics reflect the filtered subset: "
+                f"{len(filtered_keys_for_perf)} matching common queries."
+            )
+        
+        # Summary statistics
+        speedup_array = np.array(speedups)
+        faster_count = int(np.sum(speedup_array > 1))
+        slower_count = int(np.sum(speedup_array < 1))
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Faster queries", f"{faster_count} ({100*faster_count/len(speedups):.1f}%)")
+        col2.metric("Slower queries", f"{slower_count} ({100*slower_count/len(speedups):.1f}%)")
+        # Geometric mean is the standard aggregate for multiplicative ratios like speedups
+        valid_speedups = speedup_array[np.isfinite(speedup_array) & (speedup_array > 0)]
+        if valid_speedups.size > 0:
+            geom_mean = float(np.exp(np.mean(np.log(valid_speedups))))
+            col3.metric("Geometric mean speedup", f"{geom_mean:.2f}x")
+        else:
+            col3.metric("Geometric mean speedup", "N/A")
+
+        # Empirical CDF of speedups
+        xs = np.sort(np.array(speedups, dtype=float))
+        if xs.size > 0:
+            cdf = np.arange(1, xs.size + 1, dtype=float) / xs.size
+        else:
+            cdf = np.array([], dtype=float)
+
+        df_ecdf = pd.DataFrame({
+            "speedup": xs,
+            "percent": 100.0 * cdf,
+        })
+
+        st.caption("Empirical CDF of speedups")
+        use_log_scale = st.toggle("Log-scale x-axis", value=False)
+        x_scale = {"type": "log"} if use_log_scale else {"type": "linear"}
+
+        spec_ecdf = {
+            "layer": [
+                {
+                    "transform": [{"calculate": "'ECDF'", "as": "series"}],
+                    "mark": {"type": "line"},
+                    "encoding": {
+                        "x": {
+                            "field": "speedup",
+                            "type": "quantitative",
+                            "axis": {"title": "Speedup (left_time / right_time)"},
+                            "scale": x_scale,
+                        },
+                        "y": {
+                            "field": "percent",
+                            "type": "quantitative",
+                            "axis": {"title": "Queries ≤ x (%)"},
+                            "scale": {"domain": [0, 100]},
+                        },
+                        "color": {
+                            "field": "series",
+                            "type": "nominal",
+                            "legend": {"title": ""},
+                            "scale": {"domain": ["ECDF", "No change", "Geometric mean"], "range": ["steelblue", "red", "orange"]},
+                        },
+                        "strokeDash": {
+                            "field": "series",
+                            "type": "nominal",
+                            "scale": {"domain": ["ECDF", "No change", "Geometric mean"], "range": [[], [6, 4], []]},
+                        },
+                        "tooltip": [
+                            {"field": "speedup", "type": "quantitative", "title": "Speedup", "format": ".2f"},
+                            {"field": "percent", "type": "quantitative", "title": "ECDF (%)", "format": ".1f"},
+                        ],
+                    },
+                },
+                {
+                    "data": {"values": [{"x": 1.0, "series": "No change"}]},
+                    "mark": {"type": "rule"},
+                    "encoding": {
+                        "x": {"field": "x", "type": "quantitative", "scale": x_scale},
+                        "color": {
+                            "field": "series",
+                            "type": "nominal",
+                            "legend": {"title": ""},
+                            "scale": {"domain": ["ECDF", "No change", "Geometric mean"], "range": ["steelblue", "red", "orange"]},
+                        },
+                        "strokeDash": {
+                            "field": "series",
+                            "type": "nominal",
+                            "scale": {"domain": ["ECDF", "No change", "Geometric mean"], "range": [[], [6, 4], []]},
+                        },
+                        "tooltip": [{"field": "x", "type": "quantitative", "title": "No change", "format": ".2f"}],
+                    },
+                },
+            ]
+        }
+
+        # Add geometric mean vertical line and legend entry when available
+        if valid_speedups.size > 0:
+            geom_plot = float(np.exp(np.mean(np.log(valid_speedups))))
+            spec_ecdf["layer"].append(
+                {
+                    "data": {"values": [{"x": geom_plot, "series": "Geometric mean"}]},
+                    "mark": {"type": "rule"},
+                    "encoding": {
+                        "x": {"field": "x", "type": "quantitative", "scale": x_scale},
+                        "color": {
+                            "field": "series",
+                            "type": "nominal",
+                            "legend": {"title": ""},
+                            "scale": {"domain": ["ECDF", "No change", "Geometric mean"], "range": ["steelblue", "red", "orange"]},
+                        },
+                        "strokeDash": {
+                            "field": "series",
+                            "type": "nominal",
+                            "scale": {"domain": ["ECDF", "No change", "Geometric mean"], "range": [[], [6, 4], []]},
+                        },
+                        "tooltip": [
+                            {"field": "x", "type": "quantitative", "title": "Geometric mean", "format": ".2f"}
+                        ],
+                    },
+                }
             )
 
-            tabs = st.tabs(["Report", "stdout", "stderr", "Copy prompt"]) 
-            # Reports side-by-side
-            with tabs[0]:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.caption("Left: report")
-                    st.markdown(lrec.get("last_message", ""))
-                with c2:
-                    st.caption("Right: report")
-                    st.markdown(rrec.get("last_message", ""))
-
-            with tabs[1]:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.caption("Left: stdout")
-                    st.code(lrec.get("stdout", ""))
-                with c2:
-                    st.caption("Right: stdout")
-                    st.code(rrec.get("stdout", ""))
-
-            with tabs[2]:
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.caption("Left: stderr")
-                    st.code(lrec.get("stderr", ""))
-                with c2:
-                    st.caption("Right: stderr")
-                    st.code(rrec.get("stderr", ""))
-
-            with tabs[3]:
-                st.warning(
-                    ":material/warning: The prompt shown below is constructed from the **current** template, "
-                    "which may have been updated since these records were generated."
-                )
-                prompt = generate_prompt(k.query, k.stacktrace)
-                st.code(prompt, language="text", line_numbers=True)
+        st.vega_lite_chart(df_ecdf, spec_ecdf, use_container_width=True)
+    else:
+        if search:
+            st.warning(
+                f"No duration data found for performance comparison in the filtered subset "
+                f"({len(filtered_keys_for_perf)} matching common queries)."
+            )
+        else:
+            st.warning("No duration data found for performance comparison.")
 
 
 if __name__ == "__main__":
