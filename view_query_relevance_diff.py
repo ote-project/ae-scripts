@@ -186,7 +186,7 @@ def main() -> None:
                     line_numbers=True,
                 )
 
-                tabs = st.tabs(["Report", "stdout", "stderr", "Copy prompt"]) 
+                tabs = st.tabs(["Report", "stdout", "stderr", "Original prompt", "Current prompt"])
                 # Reports side-by-side
                 with tabs[0]:
                     c1, c2 = st.columns(2)
@@ -216,6 +216,23 @@ def main() -> None:
                         st.code(rrec.get("stderr", ""))
 
                 with tabs[3]:
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.caption("Left: original prompt")
+                        left_prompt = lrec.get("prompt", "")
+                        if left_prompt:
+                            st.code(left_prompt, language="text")
+                        else:
+                            st.info("No original prompt found in left record")
+                    with c2:
+                        st.caption("Right: original prompt")
+                        right_prompt = rrec.get("prompt", "")
+                        if right_prompt:
+                            st.code(right_prompt, language="text")
+                        else:
+                            st.info("No original prompt found in right record")
+
+                with tabs[4]:
                     st.warning(
                         ":material/warning: The prompt shown below is constructed from the **current** template, "
                         "which may have been updated since these records were generated."

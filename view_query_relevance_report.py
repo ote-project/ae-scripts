@@ -8,8 +8,7 @@ from typing import Any, Iterable
 import pandas as pd
 import sqlparse
 import streamlit as st
-
-from analyze_query_relevance import PROMPT_TEMPLATE
+from query_prompt import generate_query_relevance_prompt
 
 
 class Verdict(Enum):
@@ -87,10 +86,7 @@ def get_verdict_markdown_badge(verdict: Verdict) -> str:
 
 def generate_prompt(query: str, stacktrace: list) -> str:
     """Generate the prompt for a given query and stacktrace."""
-    return PROMPT_TEMPLATE.format(
-        query=query,
-        stacktrace="\n".join(stacktrace)
-    )
+    return generate_query_relevance_prompt(query, stacktrace)
 
 
 def parse_args():
@@ -220,7 +216,7 @@ def main() -> None:
             tab_names = ["SQL", "Stack trace", "Report", "stdout", "stderr"]
             if rec.get("prompt"):
                 tab_names.append("Original prompt")
-            tab_names.append("Copy current prompt")
+            tab_names.append("Current prompt")
             
             tabs = st.tabs(tab_names)
             with tabs[0]:

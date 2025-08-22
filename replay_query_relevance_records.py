@@ -1,21 +1,38 @@
 #!/usr/bin/env python3
 """
-Replay query relevance records by re-running Codex with the original prompt.
+Replay query relevance records by re-running Codex with either the original or
+the current prompt.
 
-Reads a JSONL records file (same format consumed by view_query_relevance_report.py),
-verifies that each record contains the original prompt (field: "prompt"), and then
-re-runs `codex exec` once per record (no retries), capturing stdout, stderr, last
-assistant message, duration, and exit code. Outputs a new JSONL stream to stdout,
-one JSON object per line (mirroring analyze_query_relevance.py).
+Reads a JSONL records file (same format consumed by view_query_relevance_report.py)
+and re-runs `codex exec` once per record (no retries), capturing stdout, stderr,
+last assistant message, duration, and exit code. Outputs a new JSONL stream to
+stdout, one JSON object per line (mirroring analyze_query_relevance.py).
+
+You can choose which prompt to use when replaying:
+  - original: Use the per-record "prompt" field (must exist in input).
+  - current:  Recompute the prompt using the latest template from the
+              sibling repo `concolic_driver` and the record's query/stacktrace
+              (same logic as view_query_relevance_report.py).
 
 Usage examples:
   - python replay_query_relevance_records.py path/to/records.jsonl \
+      --prompt-source original \
+      --timeout 180 \
+      --cwd /path/to/app \
+      --codex-args --model gpt-4o-mini
+
+  - python replay_query_relevance_records.py path/to/records.jsonl \
+      --prompt-source current \
       --timeout 180 \
       --cwd /path/to/app \
       --codex-args --model gpt-4o-mini
 
 Notes:
-  - If any record lacks the "prompt" field (or it is empty), the script exits with an error.
+  - When using --prompt-source original, all records must have a non-empty
+    "prompt" field; otherwise, the script exits with an error.
+  - When using --prompt-source current, the script pulls the latest prompt
+    template from ../concolic_driver and constructs prompts from query and
+    stacktrace.
   - Extra args for `codex exec` can be passed after `--codex-args`.
   - A per-invocation subprocess timeout is enforced; no retries are attempted.
 """
@@ -36,6 +53,8 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     _tqdm = None
 
+from query_prompt import generate_query_relevance_prompt
+
 
 def read_jsonl(path: Path) -> Generator[dict[str, Any], None, None]:
     """Read JSONL file and yield parsed JSON objects."""
@@ -52,9 +71,21 @@ def read_jsonl(path: Path) -> Generator[dict[str, Any], None, None]:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Re-generate query relevance records by re-running Codex with original prompts"
+        description=(
+            "Re-generate query relevance records by re-running Codex with "
+            "either original or current prompts"
+        )
     )
     parser.add_argument("input_file", help="Path to the input JSONL records file")
+    parser.add_argument(
+        "--prompt-source",
+        choices=["original", "current"],
+        default="original",
+        help=(
+            "Which prompt to use when replaying: 'original' uses the per-record prompt; "
+            "'current' regenerates the prompt from the latest template. (default: original)"
+        ),
+    )
     parser.add_argument(
         "--timeout",
         type=int,
@@ -171,13 +202,14 @@ def main() -> None:
         logging.error("No records found in input file")
         sys.exit(2)
 
-    # Enforce presence of original prompt in every record.
-    missing_prompt_indices: list[int] = [i for i, r in enumerate(records) if not r.get("prompt")]
-    if missing_prompt_indices:
-        logging.error(
-            f"Some record(s) lack the original 'prompt' field: {', '.join(map(str, missing_prompt_indices))}"
-        )
-        sys.exit(1)
+    # If using original prompts, ensure they exist.
+    if args.prompt_source == "original":
+        missing_prompt_indices: list[int] = [i for i, r in enumerate(records) if not r.get("prompt")]
+        if missing_prompt_indices:
+            logging.error(
+                f"Some record(s) lack the original 'prompt' field: {', '.join(map(str, missing_prompt_indices))}"
+            )
+            sys.exit(1)
 
     # Process sequentially to preserve input order and stream JSONL to stdout.
     total_records = len(records)
@@ -190,7 +222,10 @@ def main() -> None:
     pbar = _tqdm(total=total_records, desc="Replaying", unit="rec", file=sys.stderr, leave=False) if use_progress else None
 
     for idx, record in enumerate(records, 1):
-        prompt = record["prompt"]
+        if args.prompt_source == "original":
+            prompt = record["prompt"]
+        else:
+            prompt = generate_query_relevance_prompt(record["query"], record["stacktrace"])
 
         if not use_progress:
             logging.info(f"Processing record {idx}/{total_records}")
@@ -213,6 +248,7 @@ def main() -> None:
             "exit_code": execution_result["exit_code"],
             # Preserve the original prompt that was used for this replay for traceability
             "prompt": prompt,
+            "replay_prompt_source": args.prompt_source,
         }
         print(json.dumps(output_record, ensure_ascii=False), flush=True)
 
