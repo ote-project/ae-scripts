@@ -302,11 +302,15 @@ def _fmt_term_inner(term) -> str:
             op = r'\text{' + _escape_underscores(term["op"]) + '}'
             operand = _fmt_term_inner(term["operand"])
             return f"{op}({operand})"
-        case "BinaryOp" if term["op"] == "Eq":
+        case "BinaryOp":
             # FIXME(zhangwen): may need to parenthesize.
             lhs = _fmt_term_inner(term["lhs"])
             rhs = _fmt_term_inner(term["rhs"])
-            return f"{lhs} = {rhs}"
+            if term["op"] == "Eq":
+                return f"{lhs} = {rhs}"
+            else:
+                op = r'\text{' + _escape_underscores(term["op"]) + '}'
+                return f"{op}({lhs}, {rhs})"
         case _:
             raise ValueError(f"Unknown term: {term}")
 
@@ -333,7 +337,7 @@ def _display_sql_query_res_row_decl(r, row_counters: Counter[int]) -> None:
     st.markdown(f"""
         &nbsp;&nbsp;&nbsp;&nbsp;[{int(r['event_idx'])}]
         :violet-badge[:material/add_row_below:]
-        {_vac_badge_md(r['vacuousness'])} `Q{qi}R{row_id}`
+        {_vac_badge_md(r['vacuousness'])} $Q_{{{qi}}}R_{{{row_id}}}$
     """)
 
 
