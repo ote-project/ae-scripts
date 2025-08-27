@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+import argparse
 import asyncio
 import json
 import sys
@@ -7,7 +9,6 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, TypedDict, Literal
 
 import duckdb
-import numpy as np
 import pandas as pd
 import sqlparse
 from nicegui import ui
@@ -39,16 +40,16 @@ def build_full_index(
         raise RuntimeError("No input files found to index.")
 
     con = duckdb.connect(index_path)
-    con.execute(f"PRAGMA threads={int(threads)}")
-    con.execute("PRAGMA preserve_insertion_order=false")
-    con.execute(f"PRAGMA memory_limit={_sql_quote(memory_limit)}")
+    con.execute("PRAGMA threads=?", [int(threads)])
+    con.execute("PRAGMA preserve_insertion_order=?", [False])
+    con.execute("PRAGMA memory_limit=?", [str(memory_limit)])
 
     # Ensure a temp directory exists for spill-to-disk operations.
     tmpdir = Path("display_annotated_paths_nicegui/.duckdb_tmp")
     try:
         tmpdir.mkdir(parents=True, exist_ok=True)
-        tmp_sql = str(tmpdir).replace("'", "''")
-        con.execute(f"PRAGMA temp_directory='{tmp_sql}'")
+        tmp_sql = str(tmpdir)
+        con.execute("PRAGMA temp_directory=?", [tmp_sql])
     except Exception:
         pass
 
@@ -139,34 +140,23 @@ class AppState:
     sql_sub: str = ''
     min_sql: int = 0
     min_conds: int = 0
-    show_details: bool = False
+    show_stacktraces: bool = False
     duckdb: DuckDBConfig = field(default_factory=DuckDBConfig)
     run_id: Optional[int] = None
 
 
 # ------------------ Formatting helpers ------------------
-def _preview(text: str | None, length: int = 80) -> str:
-    """Return a short, single-line preview with ellipsis if the text is long."""
-    if text is None:
-        return ""
-    return text if len(text) <= length else text[: length - 1] + "…"
-
-
 def _vac_badge(v: str) -> ui.badge:
     match v:
         case 'Vacuous':
-            color = 'red'
+            text = 'Vacuous'
+            color = 'grey'
         case 'NonVacuous':
-            color = 'green'
+            text = 'NonVacu'
+            color = 'primary'
         case _:
             raise ValueError(f"Unknown vacuousness: {v}")
 
-    return ui.badge(v, color=color).props('outline')
-
-
-def _tf_badge(outcome: bool) -> ui.badge:
-    text = 'T' if bool(outcome) else 'F'
-    color = 'primary'
     return ui.badge(text, color=color).props('outline')
 
 
@@ -174,91 +164,13 @@ def _q_badge(qi: int) -> ui.badge:
     """Standard Q-badge: white text on purple background, dense."""
     return ui.badge(f'Q{int(qi)}', color='purple').props('text-color=white dense')
 
-
-def _fmt_qrv(term: dict) -> str:
-    q = term["qIdx"]["value"]
-    r = term["rowIdx"]["value"]
-    c = term["colIdx"]["value"]
-    rep = f"Q{q}R{r}C{c}"
-    if (name := term.get("colName")) is not None:
-        rep = f"{rep}[{name}]"
-    return rep
-
-
-def _fmt_term(term) -> str:
-    return f"`{_fmt_term_inner(term)}`"
-
-
-def _fmt_term_inner(term) -> str:
-    if term == "ConstTrue":
-        return "true"
-    if term == "ConstFalse":
-        return "false"
-
-    if not isinstance(term, dict):
-        raise ValueError(f"Unexpected term type: {term}")
-
-    match term["$type"]:
-        case "ConstString":
-            v = term["value"]
-            return f'"{v}"'
-        case "ConstLong":
-            return str(term.get("value"))
-        case "QueryResVar":
-            return _fmt_qrv(term)
-        case "DeclaredVar":
-            return term["name"]
-        case "UnaryOp":
-            op = term["op"]
-            operand = _fmt_term_inner(term.get("operand"))
-            return f"{op}({operand})"
-        case "BinaryOp":
-            lhs = _fmt_term_inner(term.get("lhs"))
-            rhs = _fmt_term_inner(term.get("rhs"))
-            op = term["op"]
-            if op == "Eq":
-                return f"{lhs} = {rhs}"
-            else:
-                return f"{op}({lhs}, {rhs})"
-        case ty:
-            raise ValueError(f"Unknown term type: {ty}")
-
-
-def _json_default(x):  # best-effort fallback for pretty JSON
-    try:
-        if isinstance(x, (np.integer, np.floating)):
-            return x.item()
-    except Exception:
-        pass
-    if isinstance(x, (set, tuple)):
-        return list(x)
-    try:
-        return str(x)
-    except Exception:
-        return repr(x)
-
-
-
-def _params_to_rows(params) -> List[Dict[str, str]]:
-    if params is None:
-        return []
-
-    items = list(params)
-    if not items:
-        return []
-
-    out: List[Dict[str, str]] = []
-    for item in items:
-        term = json.loads(item)
-        out.append({"Param": _fmt_term(term)})
-    return out
-
 # ------------------ Fragment model & renderers (for QRV tooltips) ------------------
 
 class Frag(TypedDict, total=False):
     kind: Literal['text', 'qrv']
     text: str
     q: int  # only for kind == 'qrv'
+
 
 def term_to_frags(term) -> List[Frag]:
     """Return a flat list of fragments for a term; QRVs are marked to attach tooltips."""
@@ -268,34 +180,47 @@ def term_to_frags(term) -> List[Frag]:
         return [{'kind': 'text', 'text': 'false'}]
 
     if not isinstance(term, dict):
-        return [{'kind': 'text', 'text': str(term)}]
+        raise ValueError(f"Expected term to be a dict, got: {term}")
 
-    ty = term.get("$type")
-    if ty == "ConstString":
-        return [{'kind': 'text', 'text': f"\"{term['value']}\""}]
-    if ty == "ConstLong":
-        return [{'kind': 'text', 'text': str(term.get('value'))}]
-    if ty == "DeclaredVar":
-        return [{'kind': 'text', 'text': term["name"]}]
-    if ty == "QueryResVar":
-        q = term["qIdx"]["value"]; r = term["rowIdx"]["value"]; c = term["colIdx"]["value"]
-        rep = f"Q{q}R{r}C{c}"
-        if (name := term.get("colName")) is not None:
-            rep = f"{rep}[{name}]"
-        return [{'kind': 'qrv', 'text': rep, 'q': q}]
-    if ty == "UnaryOp":
-        op = term["op"]
-        return [{'kind': 'text', 'text': f'{op}('}] + term_to_frags(term.get('operand')) + [{'kind': 'text', 'text': ')'}]
-    if ty == "BinaryOp":
-        fr_l = term_to_frags(term.get('lhs'))
-        fr_r = term_to_frags(term.get('rhs'))
-        if term.get('op') == 'Eq':
-            return fr_l + [{'kind': 'text', 'text': ' = '}] + fr_r
-        else:
-            return ([{'kind': 'text', 'text': f"{term.get('op')}("}] +
-                    fr_l + [{'kind': 'text', 'text': ', '}] +
-                    fr_r + [{'kind': 'text', 'text': ')'}])
-    # fallback for unknown types
+    match term.get("$type"):
+        case "ConstString":
+            return [{'kind': 'text', 'text': f"\"{term['value']}\""}]
+        case "ConstLong":
+            return [{'kind': 'text', 'text': str(term['value'])}]
+        case "DeclaredVar":
+            return [{'kind': 'text', 'text': term["name"]}]
+        case "QueryResVar":
+            q = term["qIdx"]["value"]; r = term["rowIdx"]["value"]; c = term["colIdx"]["value"]
+            rep = f"Q{q}R{r}C{c}"
+            if (name := term.get("colName")) is not None:
+                rep = f"{rep}[{name}]"
+            return [{'kind': 'qrv', 'text': rep, 'q': q}]
+        case "UnaryOp":
+            op = term["op"]
+            return [{'kind': 'text', 'text': f'{op}('}] + term_to_frags(term['operand']) + [{'kind': 'text', 'text': ')'}]
+        case "BinaryOp":
+            fr_l = term_to_frags(term.get('lhs'))
+            fr_r = term_to_frags(term.get('rhs'))
+            if term['op'] == 'Eq':
+                return fr_l + [{'kind': 'text', 'text': ' = '}] + fr_r
+            else:
+                return ([{'kind': 'text', 'text': f"{term.get('op')}("}] +
+                        fr_l + [{'kind': 'text', 'text': ', '}] +
+                        fr_r + [{'kind': 'text', 'text': ')'}])
+        case "Call":
+            print(term)
+            fn_frag = {'kind': 'text', 'text': term['func']}
+            # Flatten args with comma separators: func(a, b, c)
+            flat_args: List[Frag] = []
+            for i, arg in enumerate(term['args']):
+                if i > 0:
+                    flat_args.append({'kind': 'text', 'text': ', '})
+                flat_args.extend(term_to_frags(arg))
+            return ([fn_frag, {'kind': 'text', 'text': '('}] +
+                    flat_args +
+                    [{'kind': 'text', 'text': ')'}])
+
+        # fallback for unknown types
     return [{'kind': 'text', 'text': str(term)}]
 
 def render_frags(frags: List[Frag], *, pretty_by_qi: Dict[int, str], mono: bool = True) -> None:
@@ -395,10 +320,9 @@ class App:
             return None
         con = duckdb.connect(str(p))
         cfg = self.state.duckdb
-        con.execute(f"PRAGMA threads={int(cfg.threads)}")
-        con.execute(f"PRAGMA preserve_insertion_order={'true' if cfg.preserve_insertion_order else 'false'}")
-        ml = str(cfg.memory_limit).replace("'", "''")
-        con.execute(f"PRAGMA memory_limit='{ml}'")
+        con.execute("PRAGMA threads=?", [int(cfg.threads)])
+        con.execute("PRAGMA preserve_insertion_order=?", [bool(cfg.preserve_insertion_order)])
+        con.execute("PRAGMA memory_limit=?", [str(cfg.memory_limit)])
         return con
 
     # ------------- UI construction -------------
@@ -503,8 +427,8 @@ class App:
                 min_conds_input = ui.number('Min #Conds', value=self.state.min_conds, format='%.0f').props('dense')
                 min_conds_input.on('change', lambda e: self._on_filter_change(min_conds=int(min_conds_input.value or 0)))
 
-                ui.checkbox('Show query details', value=self.state.show_details,
-                            on_change=lambda e: self._on_filter_change(show_details=bool(e.value)))
+                ui.checkbox('Show stacktraces', value=self.state.show_stacktraces,
+                            on_change=lambda e: self._on_filter_change(show_stacktraces=bool(e.value)))
 
                 with ui.expansion('Advanced (DuckDB)', icon='tune'):
                     thr = ui.number('threads', value=self.state.duckdb.threads, min=1, max=64, format='%.0f')
@@ -579,8 +503,8 @@ class App:
             self.state.min_sql = kwargs['min_sql']
         if 'min_conds' in kwargs:
             self.state.min_conds = kwargs['min_conds']
-        if 'show_details' in kwargs:
-            self.state.show_details = kwargs['show_details']
+        if 'show_stacktraces' in kwargs:
+            self.state.show_stacktraces = kwargs['show_stacktraces']
         self.refresh_traces()
 
     def _on_duckdb_change(self, **kwargs) -> None:
@@ -786,11 +710,9 @@ class App:
                                             with ui.row().classes('items-center gap-1 px-2 py-[2px] rounded border border-grey-5'):
                                                 render_frags(frags, pretty_by_qi=pretty_by_qi)
 
-                            # Details
-                            if self.state.show_details:
-                                if stacktrace := r.get('stacktrace'):
-                                    with ui.expansion('Stacktrace', icon='stacked_bar_chart'):
-                                        ui.code(stacktrace, language='text')
+                            if self.state.show_stacktraces and (stacktrace := r.get('stacktrace')):
+                                with ui.expansion('Stacktrace', icon='stacked_bar_chart'):
+                                    ui.code(stacktrace, language='text')
                     case 'SqlQueryResRowDecl':
                         qi = r['qIdx']['value']
                         if current_query_card is None:
@@ -818,19 +740,65 @@ class App:
                         with ui.card().classes('w-full'):
                             with ui.row().classes('items-center gap-2'):
                                 ui.label(f"[{int(r['event_idx'])}]").classes('text-caption text-grey')
-                                _tf_badge(bool(r.get('outcome')))
                                 _vac_badge(r.get('vacuousness'))
+                                if not r['outcome']:
+                                    ui.badge('not', color='orange').props('text-color=white dense')
                                 frags = term_to_frags(r["cond"])
                                 with ui.row().classes('items-center gap-1 flex-wrap'):
                                     render_frags(frags, pretty_by_qi=pretty_by_qi)
+
+                            if self.state.show_stacktraces and (stacktrace := r.get('stacktrace')):
+                                with ui.expansion('Stacktrace', icon='stacked_bar_chart'):
+                                    ui.code(stacktrace, language='text')
                     case _:
                         raise ValueError(f"Unknown event type: {r['type']}")
 
 
+def _existing_dir(s: str) -> str:
+    p = Path(s).expanduser()
+    if not p.exists():
+        raise argparse.ArgumentTypeError(f"directory does not exist: {s}")
+    if not p.is_dir():
+        raise argparse.ArgumentTypeError(f"not a directory: {s}")
+    return str(p)
+
+
+def _port(s: str) -> int:
+    try:
+        v = int(s)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("port must be an integer") from e
+    if not (1 <= v <= 65535):
+        raise argparse.ArgumentTypeError("port must be between 1 and 65535")
+    return v
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description='Browse annotated execution paths with an interactive web interface',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    ap.add_argument('data_dir', nargs='?', type=_existing_dir,
+                    help='Directory containing paths-with-conds-*.json.gz files')
+    ap.add_argument('--port', type=_port, default=8080, help='Port to run the web server on')
+    ap.add_argument('--host', default='127.0.0.1', help='Host/interface to bind the web server to')
+    return ap.parse_args()
+
+
 def main() -> None:
-    default_data_dir = sys.argv[1] if len(sys.argv) > 1 else None
-    App(default_data_dir=default_data_dir)
-    ui.run(title='Annotated Paths Browser')
+    args = parse_args()
+    parser = argparse.ArgumentParser(
+        description='Browse annotated execution paths with an interactive web interface',
+    )
+
+    # Light-weight advisory check for expected files (non-fatal).
+    if args.data_dir:
+        data_path = Path(args.data_dir).expanduser()
+        if not any(data_path.glob("paths-with-conds-*.json.gz")):
+            print(f"Warning: no paths-with-conds-*.json.gz files found in '{args.data_dir}'", file=sys.stderr)
+
+    App(default_data_dir=args.data_dir)
+    ui.run(title='Annotated Paths Browser', port=args.port, host=args.host)
 
 
 if __name__ in {"__main__", "__mp_main__"}:
