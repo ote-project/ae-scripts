@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import html
 import json
 import sys
+import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -12,54 +14,23 @@ import duckdb
 import pandas as pd
 import sqlparse
 from nicegui import ui
-import html
 
 
 # ------------------ Data & Indexing ------------------
 
 
-def _list_input_files(data_dir: str) -> List[str]:
+def _list_input_files(data_dir: Path | str) -> List[str]:
     base = Path(data_dir).expanduser()
     return sorted([str(p) for p in base.glob("paths-with-conds-*.json.gz")])
 
 
-def _sql_quote(s: str) -> str:
-    return "'" + s.replace("'", "''") + "'"
-
-
-def build_full_index(
-    data_dir: str,
-    index_path: str,
-    threads: int = 8,
-    memory_limit: str = "system",
-    progress_cb: Optional[Callable[[int, int], None]] = None,
-) -> None:
-    base = Path(data_dir).expanduser()
-    files = sorted(str(p) for p in base.glob("paths-with-conds-*.json.gz"))
-    if not files:
-        raise RuntimeError("No input files found to index.")
-
-    con = duckdb.connect(index_path)
-    con.execute("PRAGMA threads=?", [int(threads)])
-    con.execute("PRAGMA preserve_insertion_order=?", [False])
-    con.execute("PRAGMA memory_limit=?", [str(memory_limit)])
-
-    # Ensure a temp directory exists for spill-to-disk operations.
-    tmpdir = Path("display_annotated_paths_nicegui/.duckdb_tmp")
-    try:
-        tmpdir.mkdir(parents=True, exist_ok=True)
-        tmp_sql = str(tmpdir)
-        con.execute("PRAGMA temp_directory=?", [tmp_sql])
-    except Exception:
-        pass
-
-    def events_select_sql(file_literal: str) -> str:
-        return f"""
+# Constant SQL fragment to read and explode one JSON file of events
+EVENTS_SELECT_SQL = """
         WITH exploded AS (
           SELECT r.filename AS file, r.runId,
                  i AS event_idx,
                  list_extract(r.aes, i) AS ev
-          FROM read_json_auto({file_literal}, filename=true) r,
+          FROM read_json_auto(?, filename=true) r,
                range(array_length(r.aes)) idx(i)
         )
         SELECT
@@ -78,52 +49,76 @@ def build_full_index(
         WHERE ev IS NOT NULL
         """
 
-    total = len(files)
-    if progress_cb:
-        progress_cb(0, total)
 
-    first = files[0]
-    first_lit = _sql_quote(first)
-    con.execute(f"CREATE OR REPLACE TABLE events AS {events_select_sql(first_lit)};")
-    if progress_cb:
-        progress_cb(1, total)
+def build_full_index(
+    data_dir: Path,
+    index_path: Path,
+    threads: int = 8,
+    memory_limit: str = "system",
+    progress_cb: Optional[Callable[[int, int], None]] = None,
+) -> None:
+    files = _list_input_files(data_dir)
+    if not files:
+        raise RuntimeError("No input files found to index.")
 
-    for i, f in enumerate(files[1:], start=1):
-        flit = _sql_quote(f)
-        con.execute(f"INSERT INTO events {events_select_sql(flit)};")
+    # Build index crash-safely into a temporary file, then atomically replace.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        tmp_index_path = tmpdir_path / "ap_index.duckdb"
+
+        con = duckdb.connect(str(tmp_index_path))
+        con.execute("PRAGMA threads=?", [int(threads)])
+        con.execute("PRAGMA preserve_insertion_order=?", [False])
+        con.execute("PRAGMA memory_limit=?", [memory_limit])
+
+        # Ensure a temp directory exists for spill-to-disk operations.
+        con.execute("PRAGMA temp_directory=?", [tmpdir])
+
+        total = len(files)
         if progress_cb:
-            progress_cb(i + 1, total)
+            progress_cb(0, total)
 
-    con.execute(
-        """
-        CREATE OR REPLACE TABLE traces AS
-        SELECT runId,
-               any_value(file) AS file,
-               count(*) AS n_events,
-               count(*) FILTER (WHERE type = 'SqlQueryDecl') AS n_sql,
-               count(*) FILTER (WHERE type = 'PathConditionAtom') AS n_conds
-        FROM events
-        GROUP BY runId;
-        """
-    )
+        first = files[0]
+        con.execute("CREATE OR REPLACE TABLE events AS " + EVENTS_SELECT_SQL + ";", [first])
+        if progress_cb:
+            progress_cb(1, total)
 
-    con.execute(
-        """
-        CREATE OR REPLACE TABLE queries AS
-        SELECT runId, qIdx, lower(query) AS query_lc
-        FROM events WHERE type = 'SqlQueryDecl';
-        """
-    )
+        for i, f in enumerate(files[1:], start=1):
+            con.execute("INSERT INTO events " + EVENTS_SELECT_SQL + ";", [f])
+            if progress_cb:
+                progress_cb(i + 1, total)
 
-    con.execute(
-        """
-        CREATE OR REPLACE TABLE conds AS
-        SELECT runId, struct_extract(cond, 'op') AS op, CAST(outcome AS BOOLEAN) AS outcome
-        FROM events WHERE type = 'PathConditionAtom';
-        """
-    )
+        con.execute(
+            """
+            CREATE OR REPLACE TABLE traces AS
+            SELECT runId,
+                   any_value(file) AS file,
+                   count(*) AS n_events,
+                   count(*) FILTER (WHERE type = 'SqlQueryDecl') AS n_sql,
+                   count(*) FILTER (WHERE type = 'PathConditionAtom') AS n_conds
+            FROM events
+            GROUP BY runId;
+            """
+        )
 
-    con.close()
+        con.execute(
+            """
+            CREATE OR REPLACE TABLE queries AS
+            SELECT runId, qIdx, lower(query) AS query_lc
+            FROM events WHERE type = 'SqlQueryDecl';
+            """
+        )
+
+        con.execute(
+            """
+            CREATE OR REPLACE TABLE conds AS
+            SELECT runId, struct_extract(cond, 'op') AS op, CAST(outcome AS BOOLEAN) AS outcome
+            FROM events WHERE type = 'PathConditionAtom';
+            """
+        )
+
+        con.close() # Ensure all data is flushed and connection is closed before replace
+        tmp_index_path.replace(index_path) # Atomically move into place (overwriting any existing index)
 
 
 @dataclass
@@ -135,14 +130,17 @@ class DuckDBConfig:
 
 @dataclass
 class AppState:
-    data_dir: str = ''
-    index_path: str = ''
+    data_dir: Path
     sql_sub: str = ''
     min_sql: int = 0
     min_conds: int = 0
     show_stacktraces: bool = False
     duckdb: DuckDBConfig = field(default_factory=DuckDBConfig)
     run_id: Optional[int] = None
+
+    @property
+    def index_path(self) -> Path:
+        return self.data_dir / 'ap_index.duckdb'
 
 
 # ------------------ Formatting helpers ------------------
@@ -249,11 +247,8 @@ def render_frags(frags: List[Frag], *, pretty_by_qi: Dict[int, str], mono: bool 
 
 
 class App:
-    def __init__(self, default_data_dir: Optional[str] = None) -> None:
-        self.state = AppState()
-        if default_data_dir:
-            self.state.data_dir = default_data_dir
-            self.state.index_path = str(Path(default_data_dir).expanduser() / 'ap_index.duckdb')
+    def __init__(self, data_dir: Path) -> None:
+        self.state = AppState(data_dir)
 
         # UI elements we'll update
         self.traces_table = None
@@ -274,11 +269,11 @@ class App:
     # ------------- Path display helpers -------------
 
     @staticmethod
-    def shorten_path_for_display(file_path: object, data_dir: Optional[str]) -> str:
-        """Return a short display path for a file.
+    def shorten_path_for_display(file_path: object, data_dir: Path) -> str:
+        """Return a path display relative to the given data directory.
 
-        If a data directory is provided, prefer a path relative to it; otherwise
-        fall back to the file name. Accepts any object that can be cast to str.
+        Accepts any object that can be cast to str; falls back gracefully if
+        relative computation fails.
         """
         try:
             file_str = str(file_path)
@@ -292,18 +287,15 @@ class App:
             return ""
 
         try:
-            if data_dir:
-                base = Path(data_dir).expanduser()
+            base = Path(data_dir).expanduser()
+            try:
+                return str(Path(file_str).resolve().relative_to(base.resolve()))
+            except Exception:
                 try:
-                    return str(Path(file_str).resolve().relative_to(base.resolve()))
+                    return str(Path(file_str).relative_to(base))
                 except Exception:
-                    try:
-                        return str(Path(file_str).relative_to(base))
-                    except Exception:
-                        import os
-                        return os.path.relpath(file_str, str(base))
-            # no data_dir: use just the file name
-            return Path(file_str).name
+                    import os
+                    return os.path.relpath(file_str, str(base))
         except Exception:
             return file_str
 
@@ -312,10 +304,7 @@ class App:
     def _connect_index(self) -> Optional[duckdb.DuckDBPyConnection]:
         if duckdb is None:
             return None
-        idx = self.state.index_path.strip()
-        if not idx:
-            return None
-        p = Path(idx).expanduser()
+        p = Path(self.state.index_path).expanduser()
         if not p.exists():
             return None
         con = duckdb.connect(str(p))
@@ -335,30 +324,16 @@ class App:
             with ui.column().classes('px-3 py-2 gap-2'):
                 ui.label('Filters').classes('text-subtitle2')
 
-                data_input = ui.input('Data directory', value=self.state.data_dir, placeholder='Path to annotated-paths directory')
                 self.files_found_label = ui.label('')
-
-                def on_data_change(e):
-                    self.state.data_dir = (data_input.value or '').strip()
-                    # Suggest default index alongside data
-                    if self.state.data_dir:
-                        self.state.index_path = str(Path(self.state.data_dir) / 'ap_index.duckdb')
-                        index_input.value = self.state.index_path
-                        index_input.update()
-                    self._refresh_files_found()
-                data_input.on('change', on_data_change)
 
                 ui.separator()
                 ui.label('Index').classes('text-subtitle2')
-                index_input = ui.input('Index path (.duckdb)', value=self.state.index_path)
 
                 async def on_build_click():
                     if duckdb is None:
                         ui.notify('duckdb not installed: pip install duckdb', color='negative')
                         return
-                    self.state.index_path = (index_input.value or '').strip()
-                    self.state.data_dir = (data_input.value or '').strip()
-                    files = _list_input_files(self.state.data_dir) if self.state.data_dir else []
+                    files = _list_input_files(self.state.data_dir)
                     if not files:
                         ui.notify('No files found to index', color='warning')
                         return
@@ -411,11 +386,7 @@ class App:
 
                 ui.button('Build/Refresh Full Index', on_click=on_build_click).props('color=primary')
 
-                def on_index_change(e):
-                    self.state.index_path = (index_input.value or '').strip()
-                    self._refresh_index_status()
-                    self.refresh_traces()
-                index_input.on('change', on_index_change)
+                # index path is always derived from data_dir; no input needed
 
                 ui.separator()
                 sql_input = ui.input('SQL contains', value=self.state.sql_sub)
@@ -526,7 +497,7 @@ class App:
     def _refresh_files_found(self) -> None:
         if not self.files_found_label:
             return
-        n = len(_list_input_files(self.state.data_dir)) if self.state.data_dir else 0
+        n = len(_list_input_files(self.state.data_dir))
         self.files_found_label.text = f"Found {n} files"
         self.files_found_label.update()
 
@@ -556,13 +527,13 @@ class App:
                     ui.label(label).classes('text-caption text-grey')
                     ui.label(str(val)).classes('text-h6')
 
-            ip = Path(self.state.index_path).expanduser() if self.state.index_path else None
-            if ip and ip.exists():
+            ip = Path(self.state.index_path).expanduser()
+            if ip.exists():
                 try:
                     size_mb = ip.stat().st_size / (1024 * 1024)
-                    ui.label(f"Index: {ip} ({size_mb:.1f} MB)").classes('text-caption')
+                    ui.label(f"Index: {str(ip)} ({size_mb:.1f} MB)").classes('text-caption')
                 except Exception:
-                    ui.label(f"Index: {ip}").classes('text-caption')
+                    ui.label(f"Index: {str(ip)}").classes('text-caption')
 
     def refresh_traces(self) -> None:
         if self.traces_table is None:
@@ -754,13 +725,13 @@ class App:
                         raise ValueError(f"Unknown event type: {r['type']}")
 
 
-def _existing_dir(s: str) -> str:
+def _existing_dir(s: str) -> Path:
     p = Path(s).expanduser()
     if not p.exists():
         raise argparse.ArgumentTypeError(f"directory does not exist: {s}")
     if not p.is_dir():
         raise argparse.ArgumentTypeError(f"not a directory: {s}")
-    return str(p)
+    return p
 
 
 def _port(s: str) -> int:
@@ -778,7 +749,7 @@ def parse_args():
         description='Browse annotated execution paths with an interactive web interface',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    ap.add_argument('data_dir', nargs='?', type=_existing_dir,
+    ap.add_argument('data_dir', type=_existing_dir,
                     help='Directory containing paths-with-conds-*.json.gz files')
     ap.add_argument('--port', type=_port, default=8080, help='Port to run the web server on')
     ap.add_argument('--host', default='127.0.0.1', help='Host/interface to bind the web server to')
@@ -787,17 +758,12 @@ def parse_args():
 
 def main() -> None:
     args = parse_args()
-    parser = argparse.ArgumentParser(
-        description='Browse annotated execution paths with an interactive web interface',
-    )
-
     # Light-weight advisory check for expected files (non-fatal).
-    if args.data_dir:
-        data_path = Path(args.data_dir).expanduser()
-        if not any(data_path.glob("paths-with-conds-*.json.gz")):
-            print(f"Warning: no paths-with-conds-*.json.gz files found in '{args.data_dir}'", file=sys.stderr)
+    data_path = Path(args.data_dir).expanduser()
+    if not any(data_path.glob("paths-with-conds-*.json.gz")):
+        print(f"Warning: no paths-with-conds-*.json.gz files found in '{data_path}'", file=sys.stderr)
 
-    App(default_data_dir=args.data_dir)
+    App(data_dir=data_path)
     ui.run(title='Annotated Paths Browser', port=args.port, host=args.host)
 
 
