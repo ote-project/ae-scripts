@@ -1,67 +1,35 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+from contextlib import suppress
 import html
 import json
-import sys
 import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, TypedDict, Literal
+from typing import Dict, List, Optional, TypedDict, Literal
 
 import duckdb
 import pandas as pd
 import sqlparse
 from nicegui import ui
 
-
 # ------------------ Data & Indexing ------------------
+INPUT_FILE_GLOB_PATTERN = "paths-with-conds-*.json.gz"
 
 
 def _list_input_files(data_dir: Path | str) -> List[str]:
     base = Path(data_dir).expanduser()
-    return sorted([str(p) for p in base.glob("paths-with-conds-*.json.gz")])
-
-
-# Constant SQL fragment to read and explode one JSON file of events
-EVENTS_SELECT_SQL = """
-        WITH exploded AS (
-          SELECT r.filename AS file, r.runId,
-                 i AS event_idx,
-                 list_extract(r.aes, i) AS ev
-          FROM read_json_auto(?, filename=true) r,
-               range(array_length(r.aes)) idx(i)
-        )
-        SELECT
-          file,
-          runId,
-          event_idx,
-          struct_extract(ev, 'vacuousness') AS vacuousness,
-          struct_extract(struct_extract(ev, 'elem'), '$type') AS type,
-          struct_extract(struct_extract(ev, 'elem'), 'qIdx') AS qIdx,
-          struct_extract(struct_extract(ev, 'elem'), 'query') AS query,
-          struct_extract(struct_extract(ev, 'elem'), 'params') AS params,
-          struct_extract(struct_extract(ev, 'elem'), 'stacktrace') AS stacktrace,
-          struct_extract(struct_extract(ev, 'elem'), 'cond') AS cond,
-          struct_extract(struct_extract(ev, 'elem'), 'outcome') AS outcome
-        FROM exploded
-        WHERE ev IS NOT NULL
-        """
+    return sorted([str(p) for p in base.glob(INPUT_FILE_GLOB_PATTERN)])
 
 
 def build_full_index(
     data_dir: Path,
     index_path: Path,
-    threads: int = 8,
-    memory_limit: str = "system",
-    progress_cb: Optional[Callable[[int, int], None]] = None,
+    threads: int,
+    memory_limit: str,
 ) -> None:
-    files = _list_input_files(data_dir)
-    if not files:
-        raise RuntimeError("No input files found to index.")
-
-    # Build index crash-safely into a temporary file, then atomically replace.
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         tmp_index_path = tmpdir_path / "ap_index.duckdb"
@@ -70,27 +38,33 @@ def build_full_index(
         con.execute("PRAGMA threads=?", [int(threads)])
         con.execute("PRAGMA preserve_insertion_order=?", [False])
         con.execute("PRAGMA memory_limit=?", [memory_limit])
-
-        # Ensure a temp directory exists for spill-to-disk operations.
         con.execute("PRAGMA temp_directory=?", [tmpdir])
+        con.execute("PRAGMA enable_progress_bar=true;")  # still shows per-query progress
+        con.execute("PRAGMA progress_bar_time=1000;")
 
-        total = len(files)
-        if progress_cb:
-            progress_cb(0, total)
-
-        first = files[0]
-        con.execute("CREATE OR REPLACE TABLE events AS " + EVENTS_SELECT_SQL + ";", [first])
-        if progress_cb:
-            progress_cb(1, total)
-
-        for i, f in enumerate(files[1:], start=1):
-            con.execute("INSERT INTO events " + EVENTS_SELECT_SQL + ";", [f])
-            if progress_cb:
-                progress_cb(i + 1, total)
+        con.execute(f"""
+            CREATE TABLE events AS
+                WITH exploded AS (
+                    SELECT r.runId,
+                           r.filename AS file,
+                           i AS event_idx,
+                           list_extract(r.aes, i) AS ev
+                    FROM read_json(?, records=true, filename=true) AS r,
+                         range(array_length(r.aes)) idx(i)
+                )
+                SELECT
+                    runId,
+                    file,
+                    event_idx,
+                    json_extract(ev, '$.elem') AS elem,
+                    json_extract_string(ev, '$.elem.$type')::ENUM ('SqlQueryDecl', 'SqlQueryResRowDecl', 'SqlQueryResEnd', 'PathConditionAtom') AS type,
+                    json_extract_string(ev, '$.vacuousness')::ENUM ('Vacuous', 'NonVacuous') AS vacuousness
+                FROM exploded;
+        """, [str(data_dir / 'paths-with-conds-*.json.gz')])
 
         con.execute(
             """
-            CREATE OR REPLACE TABLE traces AS
+            CREATE TABLE traces AS
             SELECT runId,
                    any_value(file) AS file,
                    count(*) AS n_events,
@@ -103,17 +77,11 @@ def build_full_index(
 
         con.execute(
             """
-            CREATE OR REPLACE TABLE queries AS
-            SELECT runId, qIdx, lower(query) AS query_lc
+            CREATE TABLE queries AS
+            SELECT runId,
+                   json_extract(elem, '$.qIdx.value')::INTEGER AS qIdx,
+                   lower(json_extract_string(elem, '$.query')) AS query_lc
             FROM events WHERE type = 'SqlQueryDecl';
-            """
-        )
-
-        con.execute(
-            """
-            CREATE OR REPLACE TABLE conds AS
-            SELECT runId, struct_extract(cond, 'op') AS op, CAST(outcome AS BOOLEAN) AS outcome
-            FROM events WHERE type = 'PathConditionAtom';
             """
         )
 
@@ -125,22 +93,16 @@ def build_full_index(
 class DuckDBConfig:
     threads: int = 4
     memory_limit: str = '8GB'
-    preserve_insertion_order: bool = False
 
 
 @dataclass
 class AppState:
-    data_dir: Path
     sql_sub: str = ''
     min_sql: int = 0
     min_conds: int = 0
     show_stacktraces: bool = False
     duckdb: DuckDBConfig = field(default_factory=DuckDBConfig)
     run_id: Optional[int] = None
-
-    @property
-    def index_path(self) -> Path:
-        return self.data_dir / 'ap_index.duckdb'
 
 
 # ------------------ Formatting helpers ------------------
@@ -247,8 +209,12 @@ def render_frags(frags: List[Frag], *, pretty_by_qi: Dict[int, str], mono: bool 
 
 
 class App:
-    def __init__(self, data_dir: Path) -> None:
-        self.state = AppState(data_dir)
+    def __init__(self, run_dir: Path) -> None:
+        self.run_dir = run_dir
+        self.data_dir = run_dir / 'annotated-paths'
+        self.index_path = self.data_dir / 'ap_index.duckdb'
+
+        self.state = AppState()
 
         # UI elements we'll update
         self.traces_table = None
@@ -256,10 +222,6 @@ class App:
         self.timeline_container = None
         self.files_found_label = None
         self.index_status_container = None
-
-        # Progress state for index build
-        self._build_progress = {"done": 0, "total": 1}
-        self._build_timer = None
 
         self._build_ui()
         self._refresh_files_found()
@@ -302,15 +264,12 @@ class App:
     # ------------- Data helpers -------------
 
     def _connect_index(self) -> Optional[duckdb.DuckDBPyConnection]:
-        if duckdb is None:
+        if not self.index_path.exists():
             return None
-        p = Path(self.state.index_path).expanduser()
-        if not p.exists():
-            return None
-        con = duckdb.connect(str(p))
+        con = duckdb.connect(str(self.index_path))
         cfg = self.state.duckdb
         con.execute("PRAGMA threads=?", [int(cfg.threads)])
-        con.execute("PRAGMA preserve_insertion_order=?", [bool(cfg.preserve_insertion_order)])
+        con.execute("PRAGMA preserve_insertion_order=?", [False])
         con.execute("PRAGMA memory_limit=?", [str(cfg.memory_limit)])
         return con
 
@@ -330,54 +289,38 @@ class App:
                 ui.label('Index').classes('text-subtitle2')
 
                 async def on_build_click():
-                    if duckdb is None:
-                        ui.notify('duckdb not installed: pip install duckdb', color='negative')
-                        return
-                    files = _list_input_files(self.state.data_dir)
-                    if not files:
-                        ui.notify('No files found to index', color='warning')
-                        return
-
                     # Progress dialog
-                    with ui.dialog() as dlg, ui.card().classes('min-w-[420px]'):
-                        ui.label('Building DuckDB index')
-                        prog = ui.linear_progress(value=0)
-                        prog_text = ui.label('0/0 files')
-
-                    self._build_progress = {"done": 0, "total": max(1, len(files))}
-
-                    def _update_progress():
-                        done = self._build_progress['done']
-                        total = max(1, self._build_progress['total'])
-                        prog.value = min(1.0, done / total)
-                        prog_text.text = f"{done}/{total} files"
-                        prog.update(); prog_text.update()
-
-                    def _cb(done: int, total: int):
-                        self._build_progress['done'] = done
-                        self._build_progress['total'] = max(1, total)
+                    with ui.dialog() as dlg, ui.card().classes('min-w-[500px]'):
+                        with ui.column().classes('gap-4 p-2'):
+                            ui.label('Building DuckDB Index').classes('text-h6 text-center')
+                            
+                            with ui.row().classes('items-center justify-center gap-8'):
+                                ui.spinner(size='lg')
+                                
+                                with ui.column().classes('gap-2'):
+                                    with ui.row().classes('items-center gap-2'):
+                                        ui.icon('memory').classes('text-primary')
+                                        ui.label(f'Threads: {int(self.state.duckdb.threads)}').classes('text-body2')
+                                    
+                                    with ui.row().classes('items-center gap-2'):
+                                        ui.icon('storage').classes('text-primary')
+                                        ui.label(f'Memory: {str(self.state.duckdb.memory_limit) or "system"}').classes('text-body2')
 
                     async def _run_build():
                         dlg.open()
                         # periodic UI updates while building in thread
-                        self._build_timer = ui.timer(0.2, _update_progress)
                         try:
                             await asyncio.to_thread(
                                 build_full_index,
-                                data_dir=self.state.data_dir,
-                                index_path=self.state.index_path,
+                                data_dir=self.data_dir,
+                                index_path=self.index_path,
                                 threads=int(self.state.duckdb.threads),
                                 memory_limit=str(self.state.duckdb.memory_limit) or 'system',
-                                progress_cb=_cb,
                             )
-                            self._build_progress['done'] = self._build_progress['total']
-                            _update_progress()
                             ui.notify('Index build complete', color='positive')
                         except Exception as e:  # pragma: no cover
                             ui.notify(f'Index build failed: {e}', color='negative', close_button=True)
                         finally:
-                            if self._build_timer:
-                                self._build_timer.cancel()
                             dlg.close()
                             self._refresh_index_status()
                             self.refresh_traces()
@@ -406,8 +349,6 @@ class App:
                     thr.on('change', lambda e: self._on_duckdb_change(threads=int(thr.value or 1)))
                     ml = ui.input('memory_limit', value=self.state.duckdb.memory_limit)
                     ml.on('change', lambda e: self._on_duckdb_change(memory_limit=str(ml.value or '8GB')))
-                    pio = ui.checkbox('preserve_insertion_order', value=self.state.duckdb.preserve_insertion_order)
-                    pio.on('change', lambda e: self._on_duckdb_change(preserve_insertion_order=bool(pio.value)))
 
         # Header (separate top-level layout element)
         with ui.header().classes('items-center justify-between'):
@@ -497,8 +438,8 @@ class App:
     def _refresh_files_found(self) -> None:
         if not self.files_found_label:
             return
-        n = len(_list_input_files(self.state.data_dir))
-        self.files_found_label.text = f"Found {n} files"
+        n = len(_list_input_files(self.data_dir))
+        self.files_found_label.text = f"Found {n} data files"
         self.files_found_label.update()
 
     def _refresh_index_status(self) -> None:
@@ -527,13 +468,10 @@ class App:
                     ui.label(label).classes('text-caption text-grey')
                     ui.label(str(val)).classes('text-h6')
 
-            ip = Path(self.state.index_path).expanduser()
-            if ip.exists():
-                try:
-                    size_mb = ip.stat().st_size / (1024 * 1024)
-                    ui.label(f"Index: {str(ip)} ({size_mb:.1f} MB)").classes('text-caption')
-                except Exception:
-                    ui.label(f"Index: {str(ip)}").classes('text-caption')
+            with suppress(FileNotFoundError):
+                ip = self.index_path
+                size_mb = ip.stat().st_size / (1024 * 1024)
+                ui.label(f"Index: {str(ip)} ({size_mb:.1f} MB)").classes('text-caption')
 
     def refresh_traces(self) -> None:
         if self.traces_table is None:
@@ -547,7 +485,7 @@ class App:
         where = ["1=1"]
         params: List[object] = []
         if self.state.sql_sub:
-            where.append("EXISTS (SELECT 1 FROM events e WHERE e.runId=t.runId AND e.type='SqlQueryDecl' AND lower(e.query) LIKE ?)")
+            where.append("EXISTS (SELECT 1 FROM queries q WHERE q.runId=t.runId AND q.query_lc LIKE ?)")
             params.append(f"%{self.state.sql_sub.lower()}%")
         if self.state.min_sql:
             where.append("n_sql >= ?")
@@ -603,8 +541,7 @@ class App:
                 [run_id],
             ).fetchdf()
             ev_df = con.execute(
-                "SELECT event_idx, type, qIdx, query, params, stacktrace, vacuousness, cond, outcome "
-                "FROM events WHERE runId = ? ORDER BY event_idx",
+                "SELECT * FROM events WHERE runId = ? ORDER BY event_idx",
                 [run_id],
             ).fetchdf()
         finally:
@@ -725,12 +662,14 @@ class App:
                         raise ValueError(f"Unknown event type: {r['type']}")
 
 
-def _existing_dir(s: str) -> Path:
+def _run_dir(s: str) -> Path:
     p = Path(s).expanduser()
-    if not p.exists():
-        raise argparse.ArgumentTypeError(f"directory does not exist: {s}")
     if not p.is_dir():
-        raise argparse.ArgumentTypeError(f"not a directory: {s}")
+        raise argparse.ArgumentTypeError(f"run directory not found: {p}")
+    if not (paths_dir := (p / 'annotated-paths')).is_dir():
+        raise argparse.ArgumentTypeError(f"run directory does not contain 'annotated-paths' subdirectory: {p}")
+    if not any(paths_dir.glob(INPUT_FILE_GLOB_PATTERN)):
+        raise argparse.ArgumentTypeError(f"no '{INPUT_FILE_GLOB_PATTERN}' files found in '{paths_dir}'")
     return p
 
 
@@ -749,8 +688,7 @@ def parse_args():
         description='Browse annotated execution paths with an interactive web interface',
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    ap.add_argument('data_dir', type=_existing_dir,
-                    help='Directory containing paths-with-conds-*.json.gz files')
+    ap.add_argument('run_dir', type=_run_dir, help='Directory containing the output of a run')
     ap.add_argument('--port', type=_port, default=8080, help='Port to run the web server on')
     ap.add_argument('--host', default='127.0.0.1', help='Host/interface to bind the web server to')
     return ap.parse_args()
@@ -759,11 +697,7 @@ def parse_args():
 def main() -> None:
     args = parse_args()
     # Light-weight advisory check for expected files (non-fatal).
-    data_path = Path(args.data_dir).expanduser()
-    if not any(data_path.glob("paths-with-conds-*.json.gz")):
-        print(f"Warning: no paths-with-conds-*.json.gz files found in '{data_path}'", file=sys.stderr)
-
-    App(data_dir=data_path)
+    App(run_dir=args.run_dir)
     ui.run(title='Annotated Paths Browser', port=args.port, host=args.host)
 
 
