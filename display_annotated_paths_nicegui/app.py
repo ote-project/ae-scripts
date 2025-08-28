@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import concurrent.futures
 import html
 import json
 import queue
+import shutil
 import tempfile
+import uuid
+import os
 from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -18,6 +22,55 @@ from nicegui import ui
 
 # ------------------ Data & Indexing ------------------
 INPUT_FILE_GLOB_PATTERN = "paths-with-conds-*.json.gz"
+EVENT_SHARDS_DIRNAME = 'event_shards'
+
+def _write_events_shard(json_file: str, out_dir: str) -> str:
+    """Worker: read one JSON(.gz) file, transform to event rows, and write a Parquet shard.
+    Returns the output shard path.
+    """
+    # Local import of duckdb to keep worker minimal
+    import duckdb as _dd
+    import os
+    # Deterministic shard name from source file
+    base = os.path.basename(json_file)
+    name, _ = os.path.splitext(base)  # .gz or .json.gz -> leave trailing .gz trimmed
+    if name.endswith('.json'):
+        name = name[:-5]
+    shard_path = os.path.join(out_dir, f"{name}.parquet")
+
+    con = _dd.connect()
+    # Keep worker-side parallelism available; rely on DuckDB default thread setting
+    con.execute("PRAGMA preserve_insertion_order=false;")
+    # Materialize the transformed rows directly to Parquet
+    dest = shard_path.replace("'", "''")
+    con.execute(
+        f"""
+        COPY (
+            WITH r AS (
+                SELECT * FROM read_json(?, records=true, filename=true)
+            ),
+            exploded AS (
+                SELECT
+                    r.runId::BIGINT  AS runId,
+                    r.filename::TEXT AS file,
+                    i::INTEGER       AS event_idx,
+                    json(list_extract(r.aes, i+1)) AS record
+                FROM r, range(array_length(r.aes)) AS idx(i)
+            )
+            SELECT
+                runId,
+                file,
+                event_idx,
+                json_extract(record, '$.elem')       AS elem,
+                json_extract_string(elem, '$.$type') AS type,
+                json_extract_string(record, '$.vacuousness')::ENUM ('Vacuous', 'NonVacuous') AS vacuousness
+            FROM exploded
+        ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
+        """,
+        [json_file],
+    )
+    con.close()
+    return shard_path
 
 
 def _list_input_files(data_dir: Path | str) -> List[str]:
@@ -41,55 +94,67 @@ def build_full_index(
         con.execute("PRAGMA preserve_insertion_order=?", [False])
         con.execute("PRAGMA memory_limit=?", [memory_limit])
         con.execute("PRAGMA temp_directory=?", [tmpdir])
-        con.execute("PRAGMA enable_progress_bar=true;")  # still shows per-query progress
-        con.execute("PRAGMA progress_bar_time=1000;")
 
-        # Create an empty events table with the desired schema.
-        con.execute(
-            """
-            CREATE TABLE events (
-                runId       BIGINT,
-                file        TEXT,
-                event_idx   INTEGER,
-                elem        JSON,
-                type        ENUM('SqlQueryDecl', 'SqlQueryResRowDecl', 'SqlQueryResEnd', 'PathConditionAtom'),
-                vacuousness ENUM('Vacuous', 'NonVacuous')
-            );
-            """
-        )
-
-        insert_sql = (
-            """
-            INSERT INTO events BY NAME
-            SELECT
-                r.runId,
-                r.filename AS file,
-                i AS event_idx,
-                json(list_extract(r.aes, i)) AS elem,
-                json_extract_string(list_extract(r.aes, i), '$.elem.$type')::ENUM('SqlQueryDecl','SqlQueryResRowDecl','SqlQueryResEnd','PathConditionAtom') AS type,
-                json_extract_string(list_extract(r.aes, i), '$.vacuousness')::ENUM('Vacuous','NonVacuous') AS vacuousness
-            FROM read_json(?, records=true, filename=true) AS r,
-                 range(array_length(r.aes)) AS idx(i);
-            """
-        )
-
+        # ---------- MAP: JSON(.gz) -> Parquet shards (in parallel) ----------
         files = _list_input_files(data_dir)
         total = len(files)
         if progress_cb is not None:
             progress_cb(0, total, '')
-        # Ingest each file individually to keep memory bounded.
-        for i, jf in enumerate(files, start=1):
-            if progress_cb is not None:
-                progress_cb(i - 1, total, jf)
-            con.execute(insert_sql, [jf])
-            # Force a checkpoint to flush to disk and release memory from the append.
-            con.execute("CHECKPOINT;")
-            if progress_cb is not None:
-                progress_cb(i, total, jf)
 
+        # Prepare temp shards directory under annotated-paths/
+        final_shards_dir = data_dir / EVENT_SHARDS_DIRNAME
+        # Build shards inside the function-scoped temporary directory first
+        sys_tmp_shards_dir = (tmpdir_path / f".{EVENT_SHARDS_DIRNAME}.build-{uuid.uuid4().hex}")
+        sys_tmp_shards_dir.mkdir(parents=True, exist_ok=True)
+
+        # Fan out per-file workers
+        done = 0
+        with concurrent.futures.ProcessPoolExecutor() as pool:
+            futs = [pool.submit(_write_events_shard, f, str(sys_tmp_shards_dir)) for f in files]
+            for fut in concurrent.futures.as_completed(futs):
+                # Propagate errors early if any
+                shard_path = fut.result()
+                done += 1
+                if progress_cb is not None:
+                    progress_cb(done, total, shard_path)
+
+        # Atomically publish shards directory
+        # First, move from system temp into a sibling temp inside data_dir (same filesystem as final)
+        publish_tmp_dir = data_dir / f".{EVENT_SHARDS_DIRNAME}.publish-{uuid.uuid4().hex}"
+        publish_tmp_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(sys_tmp_shards_dir), str(publish_tmp_dir))
+
+        backup_dir = None
+        if final_shards_dir.exists():
+            backup_dir = data_dir / f".{EVENT_SHARDS_DIRNAME}.old-{uuid.uuid4().hex}"
+            final_shards_dir.rename(backup_dir)
+        # Now the rename is within the same filesystem and therefore atomic
+        publish_tmp_dir.rename(final_shards_dir)
+        if backup_dir is not None:
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+        # ---------- REDUCE: create tiny DuckDB with VIEWS over Parquet ----------
+        # Recreate the temporary index db and define views only.
+        if progress_cb is not None:
+            progress_cb(total, total, 'reducing: building views…')
+
+        con.execute("DROP VIEW IF EXISTS events;")
+        con.execute("DROP VIEW IF EXISTS traces;")
+        con.execute("DROP VIEW IF EXISTS queries;")
+
+        shards_glob = str((final_shards_dir / '*.parquet').as_posix())
+        # Events view directly over parquet shards
+        con.execute(
+            f"""
+            CREATE VIEW events AS
+            SELECT * FROM parquet_scan('{shards_glob}');
+            """
+        )
+
+        # Traces aggregated from events view
         con.execute(
             """
-            CREATE TABLE traces AS
+            CREATE VIEW traces AS
             SELECT runId,
                    any_value(file) AS file,
                    count(*) AS n_events,
@@ -100,9 +165,10 @@ def build_full_index(
             """
         )
 
+        # Queries view extracted from elem JSON
         con.execute(
             """
-            CREATE TABLE queries AS
+            CREATE VIEW queries AS
             SELECT runId,
                    json_extract(elem, '$.qIdx.value')::INTEGER AS qIdx,
                    lower(json_extract_string(elem, '$.query')) AS query_lc
@@ -317,19 +383,17 @@ class App:
                     # Progress dialog
                     with ui.dialog() as dlg, ui.card().classes('min-w-[500px]'):
                         with ui.column().classes('gap-4 p-2'):
-                            ui.label('Building DuckDB Index').classes('text-h6 text-center')
+                            ui.label('Building Index').classes('text-h6 text-center')
 
                             with ui.row().classes('items-center justify-center gap-8'):
                                 ui.spinner(size='lg')
 
                                 with ui.column().classes('gap-2'):
+                                    # Show the number of CPU cores used by the worker pool
+                                    cores = max(1, os.cpu_count() or 1)
                                     with ui.row().classes('items-center gap-2'):
                                         ui.icon('memory').classes('text-primary')
-                                        ui.label(f'Threads: {int(self.state.duckdb.threads)}').classes('text-body2')
-
-                                    with ui.row().classes('items-center gap-2'):
-                                        ui.icon('storage').classes('text-primary')
-                                        ui.label(f'Memory: {str(self.state.duckdb.memory_limit) or "system"}').classes('text-body2')
+                                        ui.label(f'Cores: {cores}').classes('text-body2')
                                     lp = ui.linear_progress(value=0.0).classes('w-full')
                                     prog_label = ui.label('Waiting…').classes('text-caption text-grey')
 
@@ -561,7 +625,7 @@ class App:
             df = con.execute(base_sql, params).fetchdf()
             # Shorten file paths to be relative to the selected data directory for readability
             if df is not None and not df.empty and 'file' in df.columns:
-                df['file'] = df['file'].map(lambda p: App.shorten_path_for_display(p, self.state.data_dir))
+                df['file'] = df['file'].map(lambda p: App.shorten_path_for_display(p, self.data_dir))
         except Exception:
             df = pd.DataFrame(columns=['runId', 'file', 'n_events', 'n_sql', 'n_conds'])
         finally:
@@ -603,52 +667,68 @@ class App:
         finally:
             con.close()
 
+        ev_df["elem"] = ev_df["elem"].apply(json.loads)
         # Header metrics
-        if summary is not None and not summary.empty:
-            s = summary.iloc[0]
-            with self.timeline_container:
+        self._render_run_summary(summary, run_id)
+        self._render_events(ev_df)
+
+    def _render_run_summary(self, summary, run_id: int) -> None:
+        with self.timeline_container:
+            if summary is not None and not summary.empty:
+                s = summary.iloc[0]
                 with ui.card().classes('w-full'):
-                    ui.label(f"Run {int(run_id)}").classes('text-subtitle1')
+                    ui.label(f"Run {run_id}").classes('text-subtitle1')
                     # Show file path relative to the selected data directory for brevity
-                    file_disp = self.shorten_path_for_display(s.get('file', ''), self.state.data_dir)
+                    file_disp = self.shorten_path_for_display(s.get('file', ''), self.data_dir)
                     ui.label(f"file: {file_disp}").classes('text-caption')
                     with ui.row().classes('gap-6'):
                         for label, val in [('events', int(s['n_events'])), ('sql queries', int(s['n_sql'])), ('conditions', int(s['n_conds']))]:
                             with ui.card().classes('py-1 px-3'):
                                 ui.label(label).classes('text-caption text-grey')
                                 ui.label(str(val)).classes('text-body1')
-        else:
-            with self.timeline_container:
+            else:
                 ui.label(f"Run {int(run_id)} not found in index").classes('text-negative')
 
-        with self.timeline_container:
-            self._render_events(ev_df)
+    def _render_stacktrace_if_enabled(self, elem: dict) -> None:
+        """Render stacktrace expansion if enabled and stacktrace is present."""
+        if self.state.show_stacktraces and (stacktrace := elem.get('stacktrace')):
+            with ui.expansion('Stacktrace', icon='stacked_bar_chart'):
+                ui.code(stacktrace, language='text')
 
     def _render_events(self, ev_df) -> None:
-        if ev_df is None or ev_df.empty:
-            ui.label('(no events)')
-        else:
+        # Ensure all event UI is rendered inside the timeline container to avoid leaking
+        # into the current ambient UI context (e.g., the sidebar) from callbacks.
+        with self.timeline_container:
+            if ev_df is None or ev_df.empty:
+                ui.label('(no events)')
+                return
+
             # Precompute qi -> SQL for tooltips (pretty and raw)
             queries_by_qi: Dict[int, str] = {}
             for _, _row in ev_df.iterrows():
                 if _row['type'] == 'SqlQueryDecl':
-                    _qi = _row['qIdx']['value']
-                    queries_by_qi[_qi] = str(_row.get('query') or '')
-            pretty_by_qi: Dict[int, str] = {qi: sqlparse.format(q, reindent=True, keyword_case='upper') for qi, q in queries_by_qi.items()}
+                    elem = _row['elem']
+                    _qi = elem['qIdx']['value']
+                    queries_by_qi[_qi] = elem['query']
+            pretty_by_qi: Dict[int, str] = {
+                qi: sqlparse.format(q, reindent=True, keyword_case='upper')
+                for qi, q in queries_by_qi.items()
+            }
 
             row_counters: Counter[int] = Counter()
             current_query_card = None
 
             for _, r in ev_df.iterrows():
-                match r['type']:
+                elem = r['elem']
+                match elem['$type']:
                     case 'SqlQueryDecl':
                         # Start a new card for a query declaration
-                        qi = r['qIdx']['value']
+                        qi = elem['qIdx']['value']
                         if current_query_card is not None:
                             raise ValueError(f"Unexpected nested SqlQueryDecl for Q{qi}")
                         with (current_query_card := ui.card().props(f'id=q-{qi}').classes('w-full')):
                             # 3-column grid: [index] [Q badge] [content]. Parameters begin under the badge (col 2).
-                            one_line = ' '.join(r['query'].splitlines())
+                            one_line = ' '.join(elem['query'].splitlines())
                             is_short = len(one_line) <= 120
                             grid_row_align = 'items-center' if is_short else 'items-start'
                             with ui.grid().classes(f'grid-cols-[auto,auto,1fr] gap-x-2 gap-y-1 {grid_row_align} w-full'):
@@ -660,25 +740,24 @@ class App:
                                 if is_short:
                                     ui.code(one_line, language='sql').classes('m-0 p-0 whitespace-nowrap min-w-0 self-center')
                                 else:
-                                    pretty = sqlparse.format(r['query'], reindent=True, keyword_case='upper')
+                                    pretty = sqlparse.format(elem['query'], reindent=True, keyword_case='upper')
                                     ui.code(pretty, language='sql').classes('mt-0 min-w-0')
 
                                 # Row 2: Parameters start under the badge (col 2), spanning cols 2-3
-                                params = r.get('params')
-                                if params is not None and getattr(params, 'size', 0) > 0:
-                                    with ui.row().classes('items-center gap-2 flex-wrap col-start-2 col-span-2'):
-                                        ui.label('Parameters:').classes('text-caption')
-                                        for i, item in enumerate(params, 1):
-                                            term = json.loads(item)
+                                params = elem['params']
+                                with ui.row().classes('items-center gap-2 flex-wrap col-start-2 col-span-2'):
+                                    ui.label('Parameters:').classes('text-caption')
+                                    if params:
+                                        for i, term in enumerate(params, 1):
                                             frags = term_to_frags(term)
                                             with ui.row().classes('items-center gap-1 px-2 py-[2px] rounded border border-grey-5'):
                                                 render_frags(frags, pretty_by_qi=pretty_by_qi)
+                                    else:
+                                        ui.label('(none)').classes('text-caption text-grey')
 
-                            if self.state.show_stacktraces and (stacktrace := r.get('stacktrace')):
-                                with ui.expansion('Stacktrace', icon='stacked_bar_chart'):
-                                    ui.code(stacktrace, language='text')
+                            self._render_stacktrace_if_enabled(elem)
                     case 'SqlQueryResRowDecl':
-                        qi = r['qIdx']['value']
+                        qi = elem['qIdx']['value']
                         if current_query_card is None:
                             raise ValueError(f"SqlQueryResRowDecl for Q{qi} without open SqlQueryDecl")
                         with current_query_card:
@@ -689,7 +768,7 @@ class App:
                                 _vac_badge(r['vacuousness'])
                                 ui.label(f"Q{qi}R{row_id}").classes('font-mono text-sm')
                     case 'SqlQueryResEnd':
-                        qi = r['qIdx']['value']
+                        qi = elem['qIdx']['value']
                         if current_query_card is None:
                             raise ValueError(f"SqlQueryResEnd for Q{qi} without open SqlQueryDecl")
                         with current_query_card:
@@ -705,15 +784,13 @@ class App:
                             with ui.row().classes('items-center gap-2'):
                                 ui.label(f"[{int(r['event_idx'])}]").classes('text-caption text-grey')
                                 _vac_badge(r.get('vacuousness'))
-                                if not r['outcome']:
+                                if not elem['outcome']:
                                     ui.badge('not', color='orange').props('text-color=white dense')
-                                frags = term_to_frags(r["cond"])
+                                frags = term_to_frags(elem["cond"])
                                 with ui.row().classes('items-center gap-1 flex-wrap'):
                                     render_frags(frags, pretty_by_qi=pretty_by_qi)
 
-                            if self.state.show_stacktraces and (stacktrace := r.get('stacktrace')):
-                                with ui.expansion('Stacktrace', icon='stacked_bar_chart'):
-                                    ui.code(stacktrace, language='text')
+                            self._render_stacktrace_if_enabled(elem)
                     case _:
                         raise ValueError(f"Unknown event type: {r['type']}")
 
@@ -726,7 +803,7 @@ def _run_dir(s: str) -> Path:
         raise argparse.ArgumentTypeError(f"run directory does not contain 'annotated-paths' subdirectory: {p}")
     if not any(paths_dir.glob(INPUT_FILE_GLOB_PATTERN)):
         raise argparse.ArgumentTypeError(f"no '{INPUT_FILE_GLOB_PATTERN}' files found in '{paths_dir}'")
-    return p
+    return p.expanduser()
 
 
 def _port(s: str) -> int:
