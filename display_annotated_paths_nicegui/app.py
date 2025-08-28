@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
-from contextlib import suppress
 import html
 import json
+import queue
 import tempfile
 from collections import Counter
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, TypedDict, Literal
@@ -29,6 +30,7 @@ def build_full_index(
     index_path: Path,
     threads: int,
     memory_limit: str,
+    progress_cb: Optional[callable] = None,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
@@ -42,25 +44,48 @@ def build_full_index(
         con.execute("PRAGMA enable_progress_bar=true;")  # still shows per-query progress
         con.execute("PRAGMA progress_bar_time=1000;")
 
-        con.execute(f"""
-            CREATE TABLE events AS
-                WITH exploded AS (
-                    SELECT r.runId,
-                           r.filename AS file,
-                           i AS event_idx,
-                           list_extract(r.aes, i) AS ev
-                    FROM read_json(?, records=true, filename=true) AS r,
-                         range(array_length(r.aes)) idx(i)
-                )
-                SELECT
-                    runId,
-                    file,
-                    event_idx,
-                    json_extract(ev, '$.elem') AS elem,
-                    json_extract_string(ev, '$.elem.$type')::ENUM ('SqlQueryDecl', 'SqlQueryResRowDecl', 'SqlQueryResEnd', 'PathConditionAtom') AS type,
-                    json_extract_string(ev, '$.vacuousness')::ENUM ('Vacuous', 'NonVacuous') AS vacuousness
-                FROM exploded;
-        """, [str(data_dir / 'paths-with-conds-*.json.gz')])
+        # Create an empty events table with the desired schema.
+        con.execute(
+            """
+            CREATE TABLE events (
+                runId       BIGINT,
+                file        TEXT,
+                event_idx   INTEGER,
+                elem        JSON,
+                type        ENUM('SqlQueryDecl', 'SqlQueryResRowDecl', 'SqlQueryResEnd', 'PathConditionAtom'),
+                vacuousness ENUM('Vacuous', 'NonVacuous')
+            );
+            """
+        )
+
+        insert_sql = (
+            """
+            INSERT INTO events BY NAME
+            SELECT
+                r.runId,
+                r.filename AS file,
+                i AS event_idx,
+                json(list_extract(r.aes, i)) AS elem,
+                json_extract_string(list_extract(r.aes, i), '$.elem.$type')::ENUM('SqlQueryDecl','SqlQueryResRowDecl','SqlQueryResEnd','PathConditionAtom') AS type,
+                json_extract_string(list_extract(r.aes, i), '$.vacuousness')::ENUM('Vacuous','NonVacuous') AS vacuousness
+            FROM read_json(?, records=true, filename=true) AS r,
+                 range(array_length(r.aes)) AS idx(i);
+            """
+        )
+
+        files = _list_input_files(data_dir)
+        total = len(files)
+        if progress_cb is not None:
+            progress_cb(0, total, '')
+        # Ingest each file individually to keep memory bounded.
+        for i, jf in enumerate(files, start=1):
+            if progress_cb is not None:
+                progress_cb(i - 1, total, jf)
+            con.execute(insert_sql, [jf])
+            # Force a checkpoint to flush to disk and release memory from the append.
+            con.execute("CHECKPOINT;")
+            if progress_cb is not None:
+                progress_cb(i, total, jf)
 
         con.execute(
             """
@@ -293,20 +318,49 @@ class App:
                     with ui.dialog() as dlg, ui.card().classes('min-w-[500px]'):
                         with ui.column().classes('gap-4 p-2'):
                             ui.label('Building DuckDB Index').classes('text-h6 text-center')
-                            
+
                             with ui.row().classes('items-center justify-center gap-8'):
                                 ui.spinner(size='lg')
-                                
+
                                 with ui.column().classes('gap-2'):
                                     with ui.row().classes('items-center gap-2'):
                                         ui.icon('memory').classes('text-primary')
                                         ui.label(f'Threads: {int(self.state.duckdb.threads)}').classes('text-body2')
-                                    
+
                                     with ui.row().classes('items-center gap-2'):
                                         ui.icon('storage').classes('text-primary')
                                         ui.label(f'Memory: {str(self.state.duckdb.memory_limit) or "system"}').classes('text-body2')
+                                    lp = ui.linear_progress(value=0.0).classes('w-full')
+                                    prog_label = ui.label('Waiting…').classes('text-caption text-grey')
 
                     async def _run_build():
+                        q: queue.SimpleQueue[tuple[int, int, str]] = queue.SimpleQueue()
+
+                        def _progress_cb(done: int, total: int, fname: str) -> None:
+                            try:
+                                q.put((done, total, fname))
+                            except Exception:
+                                pass
+
+                        # Periodically drain progress updates from the worker thread
+                        def _drain_queue():
+                            while True:
+                                try:
+                                    done, total, fname = q.get_nowait()
+                                except queue.Empty:
+                                    break
+                                frac = (done / total) if total else 0.0
+                                lp.value = frac
+                                if fname:
+                                    # Shorten display to be relative to the selected data directory
+                                    disp = App.shorten_path_for_display(fname, self.data_dir)
+                                    prog_label.text = f"{done}/{total}  {disp}"
+                                else:
+                                    prog_label.text = f"{done}/{total}"
+                                lp.update()
+                                prog_label.update()
+                        timer = ui.timer(0.2, _drain_queue)
+
                         dlg.open()
                         # periodic UI updates while building in thread
                         try:
@@ -316,12 +370,14 @@ class App:
                                 index_path=self.index_path,
                                 threads=int(self.state.duckdb.threads),
                                 memory_limit=str(self.state.duckdb.memory_limit) or 'system',
+                                progress_cb=_progress_cb,
                             )
                             ui.notify('Index build complete', color='positive')
                         except Exception as e:  # pragma: no cover
                             ui.notify(f'Index build failed: {e}', color='negative', close_button=True)
                         finally:
                             dlg.close()
+                            timer.cancel()
                             self._refresh_index_status()
                             self.refresh_traces()
 
