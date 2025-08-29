@@ -70,7 +70,7 @@ def _write_events_shard(json_file: str, out_dir: str) -> str:
         [json_file],
     )
     con.close()
-    return shard_path
+    return os.path.abspath(shard_path)
 
 
 def _list_input_files(data_dir: Path | str) -> List[str]:
@@ -259,7 +259,6 @@ def term_to_frags(term) -> List[Frag]:
                         fr_l + [{'kind': 'text', 'text': ', '}] +
                         fr_r + [{'kind': 'text', 'text': ')'}])
         case "Call":
-            print(term)
             fn_frag = {'kind': 'text', 'text': term['func']}
             # Flatten args with comma separators: func(a, b, c)
             flat_args: List[Frag] = []
@@ -328,28 +327,16 @@ class App:
         Accepts any object that can be cast to str; falls back gracefully if
         relative computation fails.
         """
-        try:
-            file_str = str(file_path)
-        except Exception:
-            try:
-                return repr(file_path)
-            except Exception:
-                return ""
-
+        file_str = str(file_path)
         if not file_str:
             return ""
 
+        file_path = Path(file_str).resolve()
+        base_path = data_dir.resolve()
+
         try:
-            base = Path(data_dir).expanduser()
-            try:
-                return str(Path(file_str).resolve().relative_to(base.resolve()))
-            except Exception:
-                try:
-                    return str(Path(file_str).relative_to(base))
-                except Exception:
-                    import os
-                    return os.path.relpath(file_str, str(base))
-        except Exception:
+            return str(file_path.relative_to(base_path))
+        except ValueError:
             return file_str
 
     # ------------- Data helpers -------------
@@ -416,7 +403,6 @@ class App:
                                 frac = (done / total) if total else 0.0
                                 lp.value = frac
                                 if fname:
-                                    # Shorten display to be relative to the selected data directory
                                     disp = App.shorten_path_for_display(fname, self.data_dir)
                                     prog_label.text = f"{done}/{total}  {disp}"
                                 else:
