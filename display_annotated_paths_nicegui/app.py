@@ -4,14 +4,16 @@ import asyncio
 import concurrent.futures
 import html
 import json
+import os
 import queue
+import re
 import shutil
 import tempfile
 import uuid
-import os
 from collections import Counter
 from contextlib import suppress
 from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, TypedDict, Literal
 
@@ -20,8 +22,16 @@ import pandas as pd
 import sqlparse
 from nicegui import ui
 
+
+class Verdict(Enum):
+    RELEVANT = 'Relevant'
+    IRRELEVANT = 'Irrelevant'
+    UNSURE = 'Unsure'
+    UNKNOWN = 'Unknown'
+
+
 # ------------------ Data & Indexing ------------------
-INPUT_FILE_GLOB_PATTERN = "paths-with-conds-*.json.gz"
+INPUT_FILE_GLOB_PATTERN = "paths-*.json.gz"
 EVENT_SHARDS_DIRNAME = 'event_shards'
 
 def _write_events_shard(json_file: str, out_dir: str) -> str:
@@ -63,7 +73,8 @@ def _write_events_shard(json_file: str, out_dir: str) -> str:
                 event_idx,
                 json_extract(record, '$.elem')       AS elem,
                 json_extract_string(elem, '$.$type') AS type,
-                json_extract_string(record, '$.vacuousness')::ENUM ('Vacuous', 'NonVacuous') AS vacuousness
+                json_extract_string(record, '$.vacuousness')::ENUM ('Vacuous', 'NonVacuous') AS vacuousness,
+                json_extract_string(record, '$.oracleDigest') AS oracle_digest
             FROM exploded
         ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
         """,
@@ -191,7 +202,6 @@ class AppState:
     sql_sub: str = ''
     min_sql: int = 0
     min_conds: int = 0
-    show_stacktraces: bool = False
     duckdb: DuckDBConfig = field(default_factory=DuckDBConfig)
     run_id: Optional[int] = None
 
@@ -213,7 +223,7 @@ def _vac_badge(v: str) -> ui.badge:
 
 def _q_badge(qi: int) -> ui.badge:
     """Standard Q-badge: white text on purple background, dense."""
-    return ui.badge(f'Q{int(qi)}', color='purple').props('text-color=white dense')
+    return ui.badge(f'Q{int(qi)}').props('text-color=white dense')
 
 # ------------------ Fragment model & renderers (for QRV tooltips) ------------------
 
@@ -354,6 +364,14 @@ class App:
     # ------------- UI construction -------------
 
     def _build_ui(self) -> None:
+        # Global CSS tweaks for CodeMirror sizing and stability
+        ui.add_css('.cm-editor{width:100%}.cm-scroller{overflow:auto}.cm-content{min-width:0!important}')
+        # Min height for non-dialog stacktrace editors (e.g., in Oracle tab)
+        ui.add_css('.stacktrace-cm .cm-editor{min-height:24rem}')
+        # Large fixed height for stacktrace shown in dialog
+        # In dialog, let the editor fill the remaining space of a flex column layout
+        ui.add_css('.stacktrace-dialog .cm-editor{height:100%}')
+
         # Top-level drawer (must not be nested under header)
         self._drawer = ui.left_drawer(value=True, fixed=True).classes('bg-grey-2')
 
@@ -435,6 +453,9 @@ class App:
 
                 ui.button('Build/Refresh Full Index', on_click=on_build_click).props('color=primary')
 
+                # Index status lives in the sidebar
+                self.index_status_container = ui.card().classes('w-full p-2')
+
                 # index path is always derived from data_dir; no input needed
 
                 ui.separator()
@@ -446,9 +467,6 @@ class App:
 
                 min_conds_input = ui.number('Min #Conds', value=self.state.min_conds, format='%.0f').props('dense')
                 min_conds_input.on('change', lambda e: self._on_filter_change(min_conds=int(min_conds_input.value or 0)))
-
-                ui.checkbox('Show stacktraces', value=self.state.show_stacktraces,
-                            on_change=lambda e: self._on_filter_change(show_stacktraces=bool(e.value)))
 
                 with ui.expansion('Advanced (DuckDB)', icon='tune'):
                     thr = ui.number('threads', value=self.state.duckdb.threads, min=1, max=64, format='%.0f')
@@ -465,10 +483,6 @@ class App:
         # Main content
         with ui.row().classes('px-4 py-2 gap-4'):
             with ui.column().classes('w-full gap-3'):
-                # Index status
-                self.index_status_container = ui.row().classes('gap-6 items-center')
-
-                ui.separator()
                 ui.label('Traces').classes('text-h6')
                 self.traces_table = ui.table(columns=[
                     {'name': 'runId', 'label': 'runId', 'field': 'runId'},
@@ -500,8 +514,8 @@ class App:
                         on_change=lambda e: self._on_run_change(e.value),
                     )
 
-                # Timeline container (Raw tab removed)
-                self.timeline_container = ui.column().classes('gap-2')
+                # Timeline container
+                self.timeline_container = ui.column().classes('gap-2 w-full')
 
     # ------------- Callbacks -------------
 
@@ -521,8 +535,6 @@ class App:
             self.state.min_sql = kwargs['min_sql']
         if 'min_conds' in kwargs:
             self.state.min_conds = kwargs['min_conds']
-        if 'show_stacktraces' in kwargs:
-            self.state.show_stacktraces = kwargs['show_stacktraces']
         self.refresh_traces()
 
     def _on_duckdb_change(self, **kwargs) -> None:
@@ -553,31 +565,44 @@ class App:
             return
         self.index_status_container.clear()
         with self.index_status_container:
+            ui.label('Index Status').classes('text-caption text-grey-7')
+
             if duckdb is None:
-                ui.badge('duckdb not installed').props('color=negative outline')
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('error').classes('text-negative')
+                    ui.label('DuckDB not installed').classes('text-negative')
                 return
+
             con = self._connect_index()
             if not con:
-                ui.badge('Index not found').props('color=warning outline')
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('warning').classes('text-warning')
+                    ui.label('Index not found').classes('text-warning')
                 return
-            try:
-                n_traces = con.execute("SELECT count(*) FROM traces").fetchone()[0]
-                row = con.execute("SELECT coalesce(sum(n_events),0), coalesce(sum(n_sql),0), coalesce(sum(n_conds),0) FROM traces").fetchone()
-                n_events, n_sql, n_conds = int(row[0]), int(row[1]), int(row[2])
-            except Exception:
-                n_traces = n_events = n_sql = n_conds = 0
-            finally:
-                con.close()
-
-            for label, val in [('traces', n_traces), ('events', n_events), ('sql queries', n_sql), ('conditions', n_conds)]:
-                with ui.card().classes('py-2 px-4'):
-                    ui.label(label).classes('text-caption text-grey')
-                    ui.label(str(val)).classes('text-h6')
 
             with suppress(FileNotFoundError):
                 ip = self.index_path
+                ui.label(str(ip)).classes('text-caption text-grey')
                 size_mb = ip.stat().st_size / (1024 * 1024)
-                ui.label(f"Index: {str(ip)} ({size_mb:.1f} MB)").classes('text-caption')
+                with ui.row().classes('items-center gap-2 mt-1'):
+                    ui.icon('storage').classes('text-grey')
+                    ui.label(f"{size_mb:.1f} MB").classes('text-caption')
+
+            try:
+                n_traces = con.execute("SELECT count(*) FROM traces").fetchone()[0]
+                row = con.execute("SELECT coalesce(sum(n_events),0) FROM traces").fetchone()
+                n_events = int(row[0])
+            finally:
+                con.close()
+
+            with ui.row().classes('gap-2 flex-wrap'):
+                for label, val in [
+                    ('traces', n_traces),
+                    ('events', n_events),
+                ]:
+                    with ui.row().classes('items-baseline gap-1 px-2 py-[2px] rounded border border-grey-5 bg-white'):
+                        ui.label(label).classes('text-caption text-grey-7')
+                        ui.label(str(val)).classes('text-body2 font-medium')
 
     def refresh_traces(self) -> None:
         if self.traces_table is None:
@@ -656,7 +681,19 @@ class App:
         ev_df["elem"] = ev_df["elem"].apply(json.loads)
         # Header metrics
         self._render_run_summary(summary, run_id)
-        self._render_events(ev_df)
+
+        # Tabs for run detail: Trace and Query Oracle Outputs
+        with self.timeline_container:
+            with ui.tabs() as tabs:
+                tab_trace = ui.tab('Trace')
+                tab_oracle = ui.tab('Query Oracle')
+            with ui.tab_panels(tabs, value=tab_trace).classes('w-full min-w-0'):
+                with ui.tab_panel(tab_trace):
+                    with ui.column().classes('gap-2') as trace_panel:
+                        self._render_events(ev_df, parent=trace_panel)
+                with ui.tab_panel(tab_oracle):
+                    with ui.column().classes('gap-2 w-full') as oracle_panel:
+                        self._render_oracle_outputs(parent=oracle_panel)
 
     def _render_run_summary(self, summary, run_id: int) -> None:
         with self.timeline_container:
@@ -675,16 +712,51 @@ class App:
             else:
                 ui.label(f"Run {int(run_id)} not found in index").classes('text-negative')
 
-    def _render_stacktrace_if_enabled(self, elem: dict) -> None:
-        """Render stacktrace expansion if enabled and stacktrace is present."""
-        if self.state.show_stacktraces and (stacktrace := elem.get('stacktrace')):
-            with ui.expansion('Stacktrace', icon='stacked_bar_chart'):
-                ui.code(stacktrace, language='text')
+    @staticmethod
+    def _render_stacktrace(elem: dict, *, compact: bool = False) -> None:
+        """Render a button that opens a large dialog showing the stacktrace (if present).
 
-    def _render_events(self, ev_df) -> None:
-        # Ensure all event UI is rendered inside the timeline container to avoid leaking
+        Args:
+            elem: Event element dict which may contain 'stacktrace'.
+            compact: If True, render a small, subtle inline icon button suitable for inline use.
+        """
+        stack_val = elem.get('stacktrace')
+        if not stack_val:
+            return
+
+        # Normalize to plain text
+        if isinstance(stack_val, list):
+            stack_text = '\n'.join(stack_val)
+        else:
+            stack_text = str(stack_val)
+
+        # Pre-create dialog and a button to open it
+        with ui.dialog() as dlg:
+            dlg.props('maximized')
+            # Fullscreen card with flex column to pin footer at bottom
+            with ui.card().classes('w-screen h-screen max-w-none max-h-none p-2 flex flex-col gap-2'):
+                with ui.row().classes('items-center justify-between w-full'):
+                    ui.label('Stacktrace').classes('text-subtitle1')
+                    ui.button(icon='close', on_click=dlg.close).props('flat round dense')
+                # Growing content area that the editor will fill
+                with ui.element('div').classes('flex-1 min-h-0 w-full'):
+                    ui.codemirror(value=stack_text, line_wrapping=True).classes('w-full h-full stacktrace-dialog')
+                with ui.row().classes('justify-end w-full'):
+                    ui.button('Close', on_click=dlg.close).props('flat')
+
+        if compact:
+            btn = ui.button(icon='troubleshoot', on_click=dlg.open).props('flat dense color=primary').classes('rounded-none w-7 h-7 ml-2')
+            with btn:
+                ui.tooltip('Stacktrace')
+        else:
+            ui.button(icon='troubleshoot', on_click=dlg.open).props('outline color=primary').classes('w-10 h-10 rounded-none')
+
+    def _render_events(self, ev_df, *, parent=None) -> None:
+        """Render the events timeline into the given parent (or the timeline container)."""
+        container = parent or self.timeline_container
+        # Ensure all event UI is rendered inside the desired container to avoid leaking
         # into the current ambient UI context (e.g., the sidebar) from callbacks.
-        with self.timeline_container:
+        with container:
             if ev_df is None or ev_df.empty:
                 ui.label('(no events)')
                 return
@@ -722,12 +794,19 @@ class App:
                                 ui.label(f"[{r['event_idx']}]").classes('text-caption text-grey' + (' self-center' if is_short else ''))
                                 # Row 1, Col 2: Q badge
                                 _q_badge(qi).classes('self-center' if is_short else '')
-                                # Row 1, Col 3: content (single-line or multi-line)
+                                # Row 1, Col 3: content (single-line or multi-line) with inline stacktrace button on the right
                                 if is_short:
-                                    ui.code(one_line, language='sql').classes('m-0 p-0 whitespace-nowrap min-w-0 self-center')
+                                    with ui.row().classes('items-center gap-2 min-w-0 self-center'):
+                                        ui.code(one_line, language='sql').classes('m-0 p-0 whitespace-nowrap min-w-0 self-center flex-1')
+                                        # compact inline stacktrace button
+                                        self._render_stacktrace(elem, compact=True)
                                 else:
                                     pretty = sqlparse.format(elem['query'], reindent=True, keyword_case='upper')
-                                    ui.code(pretty, language='sql').classes('mt-0 min-w-0')
+                                    with ui.row().classes('items-start gap-2 min-w-0'):
+                                        with ui.element('div').classes('flex-1 min-w-0'):
+                                            ui.code(pretty, language='sql').classes('mt-0 min-w-0')
+                                        # compact inline stacktrace button
+                                        self._render_stacktrace(elem, compact=True)
 
                                 # Row 2: Parameters start under the badge (col 2), spanning cols 2-3
                                 params = elem['params']
@@ -741,7 +820,6 @@ class App:
                                     else:
                                         ui.label('(none)').classes('text-caption text-grey')
 
-                            self._render_stacktrace_if_enabled(elem)
                     case 'SqlQueryResRowDecl':
                         qi = elem['qIdx']['value']
                         if current_query_card is None:
@@ -767,18 +845,225 @@ class App:
                         if current_query_card is not None:
                             raise ValueError("PathConditionAtom inside SqlQueryDecl")
                         with ui.card().classes('w-full'):
-                            with ui.row().classes('items-center gap-2'):
+                            # Single row containing index, badge, condition (flex-grow), and right-aligned button
+                            with ui.row().classes('items-start gap-2 w-full'):
                                 ui.label(f"[{int(r['event_idx'])}]").classes('text-caption text-grey')
-                                _vac_badge(r.get('vacuousness'))
-                                if not elem['outcome']:
-                                    ui.badge('not', color='orange').props('text-color=white dense')
+                                _vac_badge(r['vacuousness'])
+                                # FIXME(zhangwen): parenthesize properly based on precedence.
                                 frags = term_to_frags(elem["cond"])
-                                with ui.row().classes('items-center gap-1 flex-wrap'):
+                                if elem['outcome'] is False:
+                                    frags = [{'kind': 'text', 'text': '!'}] + frags
+                                # Condition fragments occupy remaining space and can wrap
+                                with ui.row().classes('items-center gap-1 flex-wrap flex-1 min-w-0'):
                                     render_frags(frags, pretty_by_qi=pretty_by_qi)
-
-                            self._render_stacktrace_if_enabled(elem)
+                                # Compact stacktrace button flush to the right
+                                self._render_stacktrace(elem, compact=True)
                     case _:
                         raise ValueError(f"Unknown event type: {r['type']}")
+
+    # ------------------ Terminal-style renderer ------------------
+    @staticmethod
+    def render_terminal(text: Optional[str], *, wrap: bool = True, max_height: str = '30rem') -> None:
+        """Render plain text in a terminal-like block (monospace, preserved whitespace).
+
+        Args:
+            text: The text to show; None is treated as empty.
+            wrap: If True, long lines wrap; if False, allow horizontal scrolling.
+            max_height: Tailwind size for max height (e.g., '18rem', '24rem').
+        """
+        content = '' if text is None else str(text)
+        classes = 'font-mono text-sm bg-grey-1 border border-grey-4 rounded p-2 w-full '
+        classes += 'whitespace-pre-wrap break-words ' if wrap else 'whitespace-pre '
+        classes += 'overflow-auto'
+        # Use inline style for max-height to avoid Tailwind JIT issues with dynamic class names
+        safe = html.escape(content)
+        ui.html(f'<pre class="{classes}" style="max-height: {max_height};">{safe}</pre>')
+
+    # ------------------ Oracle outputs (query relevance) ------------------
+    @staticmethod
+    def _preview(text: Optional[str], length: int = 120) -> str:
+        if not text:
+            return ''
+        t = text.replace('\n', ' ')
+        return t if len(t) <= length else t[: length - 1] + '…'
+
+    @staticmethod
+    def _compute_tokens_used_from_stdout(stdout: Optional[str]) -> Optional[int]:
+        if not stdout:
+            return None
+        m = re.findall(r"tokens used: (\d+)", stdout)
+        return int(m[-1]) if m else None
+
+    @staticmethod
+    def _compute_verdict(rec: dict) -> Verdict:
+        """Map record verdict to a Verdict enum (Relevant, Irrelevant, Unsure, Unknown)."""
+        if (v := rec.get('verdict')) is None:
+            return Verdict.UNKNOWN
+
+        vl = v.strip().lower()
+        if vl in {'yes', 'relevant'}:
+            return Verdict.RELEVANT
+        if vl in {'no', 'irrelevant'}:
+            return Verdict.IRRELEVANT
+        if vl == 'unsure':
+            return Verdict.UNSURE
+
+        return Verdict.UNKNOWN
+
+    @staticmethod
+    def _verdict_badge(verdict: Verdict) -> ui.badge:
+        match verdict:
+            case Verdict.RELEVANT:
+                color = 'positive'
+            case Verdict.IRRELEVANT:
+                color = 'negative'
+            case Verdict.UNSURE:
+                color = 'warning'
+            case Verdict.UNKNOWN:
+                color = 'grey'
+        return ui.badge(verdict.value, color=color).props('outline')
+
+    def _load_oracle_records(self) -> tuple[List[dict], Optional[Path]]:
+        chosen = self.run_dir / 'oracle-logs'
+        if not chosen.is_dir():
+            return [], None
+
+        files = sorted(chosen.glob('codex-query-*.jsonl'))
+        recs: List[dict] = []
+        for fp in files:
+            with fp.open('r') as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    rec = json.loads(line)
+                    recs.append(rec)
+
+        # Normalize
+        for r in recs:
+            r['verdict'] = self._compute_verdict(r)
+            if 'tokens_used' not in r:
+                r['tokens_used'] = self._compute_tokens_used_from_stdout(r.get('stdout'))
+        return recs, chosen
+
+    def _render_oracle_outputs(self, *, parent=None) -> None:
+        """Render the oracle outputs tab contents inside the given parent or current context."""
+        container = parent or self.timeline_container
+        records, chosen_dir = self._load_oracle_records()
+        with container:
+            ui.label('Query Oracle').classes('text-subtitle1')
+            if not records:
+                msg = 'No oracle outputs found.'
+                if chosen_dir is None:
+                    msg += " Expected directory 'oracle-logs'."
+                ui.label(msg).classes('text-caption text-grey')
+                return
+
+            # Directory context
+            if chosen_dir is not None:
+                ui.label(f"Loaded {len(records)} record(s) from {str(chosen_dir)}.").classes('text-caption text-grey')
+
+            # Summary metrics
+            counts = Counter(r['verdict'] for r in records)
+            with ui.row().classes('gap-4'):
+                for v in (Verdict.RELEVANT, Verdict.IRRELEVANT, Verdict.UNSURE, Verdict.UNKNOWN):
+                    with ui.card().classes('py-2 px-4'):
+                        self._verdict_badge(v)
+                        ui.label(str(counts[v])).classes('text-h6')
+
+            ui.separator()
+
+            # Summary table
+            # rows = []
+            # for r in records:
+            #     rows.append({
+            #         'query': self._preview(r.get('query')),
+            #         'verdict': (r.get('verdict') or Verdict.UNKNOWN).value,
+            #         'dur_s': r.get('dur_s'),
+            #         'tokens_used': r.get('tokens_used'),
+            #         'exit_code': r.get('exit_code'),
+            #     })
+            # columns = [
+            #     {'name': 'query', 'label': 'Query', 'field': 'query'},
+            #     {'name': 'verdict', 'label': 'Verdict', 'field': 'verdict'},
+            #     {'name': 'dur_s', 'label': 'Duration (s)', 'field': 'dur_s'},
+            #     {'name': 'tokens_used', 'label': 'Tokens used', 'field': 'tokens_used'},
+            #     {'name': 'exit_code', 'label': 'Exit code', 'field': 'exit_code'},
+            # ]
+            # ui.table(columns=columns, rows=rows).props('dense flat bordered wrap-cells')
+            ui.aggrid({
+                'columnDefs': [
+                    {'headerName': 'Query', 'field': 'query', 'cellClass': 'font-mono', 'flex': 1},
+                    {'headerName': 'Verdict', 'field': 'verdict', 'width': 25, 'cellClassRules': {
+                        'bg-positive text-white': "data.verdict === 'Relevant'",
+                        'bg-negative text-white': "data.verdict === 'Irrelevant'",
+                        'bg-warning text-black': "data.verdict === 'Unsure'",
+                        'bg-grey-5 text-black': "data.verdict === 'Unknown'",
+                    }},
+                    {'headerName': 'Duration (s)', 'field': 'dur_s', 'width': 30},
+                    {'headerName': 'Tokens used', 'field': 'tokens_used', 'width': 30},
+                    {'headerName': 'Exit', 'field': 'exit_code', 'width': 20},
+                ],
+                'rowData': records,
+                # When data is rendered, auto-size all columns except Query to fit content
+                'onFirstDataRendered': (
+                    'function(params){'
+                    '  const all = params.columnApi.getAllColumns().map(c => c.getColId());'
+                    '  const toSize = all.filter(id => id !== "query");'
+                    '  params.columnApi.autoSizeColumns(toSize, false);'
+                    '}'
+                ),
+            }).classes('w-full')
+
+            ui.separator()
+            ui.label('Detailed Records').classes('text-subtitle2')
+
+            # Detailed expanders
+            for idx, r in enumerate(records):
+                v = (r.get('verdict') or Verdict.UNKNOWN)
+                header = f"[{idx}] {v.value}  ` {self._preview(r.get('query'))} `"
+                with ui.expansion(header, icon='manage_search'):
+                    # Top metadata
+                    with ui.grid().classes('grid-cols-4 gap-8'):
+                        with ui.column():
+                            ui.label('Verdict').classes('text-caption text-grey')
+                            self._verdict_badge(r.get('verdict'))
+                        with ui.column():
+                            ui.label('Tokens used').classes('text-caption text-grey')
+                            ui.label(str(r.get('tokens_used', '—')))
+                        with ui.column():
+                            ui.label('Duration (s)').classes('text-caption text-grey')
+                            ui.label(str(r.get('dur_s', '—')))
+                        with ui.column():
+                            ui.label('Exit code').classes('text-caption text-grey')
+                            ui.label(str(r.get('exit_code', '—')))
+
+                    # Tabs for content
+                    with ui.tabs().classes('mt-2') as tabs:
+                        t_sql = ui.tab('SQL')
+                        t_stack = ui.tab('Stacktrace')
+                        t_report = ui.tab('Report')
+                        t_stdout = ui.tab('stdout')
+                        t_stderr = ui.tab('stderr')
+                        t_prompt_orig = ui.tab('Original prompt') if r.get('prompt') else None
+
+                    with ui.tab_panels(tabs, value=t_sql).classes('w-full min-w-0'):
+                        with ui.tab_panel(t_sql):
+                            pretty = sqlparse.format(r['query'], reindent=True, keyword_case='upper')
+                            ui.code(pretty, language='sql').classes('m-0')
+                        with ui.tab_panel(t_stack):
+                            stack_text = '\n'.join(r.get('stacktrace') or [])
+                            ui.codemirror(value=stack_text, line_wrapping=True).classes('w-full')
+                        with ui.tab_panel(t_report):
+                            report_text = r.get('last_message') or ''
+                            ui.markdown(report_text)
+                        with ui.tab_panel(t_stdout):
+                            self.render_terminal(r.get('stdout'))
+                        with ui.tab_panel(t_stderr):
+                            self.render_terminal(r.get('stderr'))
+                        if t_prompt_orig is not None:
+                            with ui.tab_panel(t_prompt_orig):
+                                ui.codemirror(value=r['prompt'], line_wrapping=True).classes('w-full')
 
 
 def _run_dir(s: str) -> Path:
