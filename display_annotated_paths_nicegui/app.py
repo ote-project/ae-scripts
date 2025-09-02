@@ -368,6 +368,8 @@ class App:
         ui.add_css('.cm-editor{width:100%}.cm-scroller{overflow:auto}.cm-content{min-width:0!important}')
         # Min height for non-dialog stacktrace editors (e.g., in Oracle tab)
         ui.add_css('.stacktrace-cm .cm-editor{min-height:24rem}')
+        # Make the Original prompt editor taller by default
+        ui.add_css('.prompt-cm .cm-editor{min-height:18rem}')
         # Large fixed height for stacktrace shown in dialog
         # In dialog, let the editor fill the remaining space of a flex column layout
         ui.add_css('.stacktrace-dialog .cm-editor{height:100%}')
@@ -788,6 +790,10 @@ class App:
                 for qi, q in queries_by_qi.items()
             }
 
+            # Load oracle records once and index by key_digest for quick lookup
+            oracle_records, _ = self._load_oracle_records()
+            oracle_by_digest: Dict[str, dict] = {r['key_digest']: r for r in oracle_records}
+
             row_counters: Counter[int] = Counter()
             current_query_card = None
 
@@ -807,8 +813,37 @@ class App:
                             with ui.grid().classes(f'grid-cols-[auto,auto,1fr] gap-x-2 gap-y-1 {grid_row_align} w-full'):
                                 # Row 1, Col 1: index
                                 ui.label(f"[{r['event_idx']}]").classes('text-caption text-grey' + (' self-center' if is_short else ''))
-                                # Row 1, Col 2: Q badge
-                                _q_badge(qi).classes('self-center' if is_short else '')
+                                # Row 1, Col 2: Q badge (+ optional oracle verdict badge)
+                                with ui.row().classes('items-center gap-2' + (' self-center' if is_short else '')):
+                                    _q_badge(qi)
+                                    # If linked oracle record is found, show a clickable verdict badge
+                                    try:
+                                        od = r.get('oracle_digest') if isinstance(r, dict) else r['oracle_digest']
+                                    except Exception:
+                                        od = None
+                                    rec = oracle_by_digest.get(od) if od else None
+                                    if rec is not None:
+                                        badge = self._verdict_badge(rec.get('verdict')).classes('cursor-pointer')
+                                        # Click badge to open a fullscreen dialog with oracle details
+                                        with ui.dialog() as dlg:
+                                            dlg.props('maximized')
+                                            # Fullscreen card; flex column with scrollable content area
+                                            with ui.card().classes('w-screen h-screen max-w-none max-h-none p-2 flex flex-col gap-2 overflow-hidden'):
+                                                with ui.row().classes('items-center justify-between w-full'):
+                                                    ui.label(f'Oracle Details for Q{qi}').classes('text-subtitle1')
+                                                    ui.button(icon='close', on_click=dlg.close).props('flat round dense')
+                                                # Content area grows and scrolls if long
+                                                with ui.element('div').classes('flex-1 min-h-0 w-full overflow-auto'):
+                                                    self._render_oracle_record_details_content(rec)
+
+                                                with ui.row().classes('justify-end w-full'):
+                                                    ui.button('Close', on_click=dlg.close).props('flat')
+                                        # Bind click handler to open the dialog
+                                        try:
+                                            badge.on('click', dlg.open)
+                                        except Exception:
+                                            # Fallback in case .on is not available on badge
+                                            pass
                                 # Row 1, Col 3: content (single-line or multi-line) with inline stacktrace button on the right
                                 if is_short:
                                     with ui.row().classes('items-center gap-2 min-w-0 self-center'):
@@ -929,14 +964,16 @@ class App:
     def _verdict_badge(verdict: Verdict) -> ui.badge:
         match verdict:
             case Verdict.RELEVANT:
-                color = 'positive'
+                color, text_color = 'positive', 'white'
             case Verdict.IRRELEVANT:
-                color = 'negative'
+                color, text_color = 'negative', 'white'
             case Verdict.UNSURE:
-                color = 'warning'
+                # Yellow background benefits from dark text for contrast
+                color, text_color = 'warning', 'black'
             case Verdict.UNKNOWN:
-                color = 'grey'
-        return ui.badge(verdict.value, color=color).props('outline')
+                # Grey background: use dark text for readability
+                color, text_color = 'grey', 'black'
+        return ui.badge(verdict.value, color=color).props(f'text-color={text_color}')
 
     def _load_oracle_records(self) -> tuple[List[dict], Optional[Path]]:
         chosen = self.run_dir / 'oracle-logs'
@@ -961,6 +998,71 @@ class App:
             if 'tokens_used' not in r:
                 r['tokens_used'] = self._compute_tokens_used_from_stdout(r.get('stdout'))
         return recs, chosen
+
+    # Shared renderer for Oracle record details (used in tab and fullscreen dialog)
+    def _render_oracle_record_details_content(self, rec: dict) -> None:
+        """Render the Oracle record details content (metadata + sections).
+
+        This is used by the Oracle tab (Record Details) and the fullscreen
+        dialog opened from verdict badges in the Trace tab.
+        """
+        with ui.column().classes('gap-2 w-full min-w-0'):
+            # Top metadata
+            # Include row number plus metadata; make first data column wider for long digests
+            with ui.grid().classes('grid-cols-[auto,2fr,1fr,1fr,1fr,1fr] gap-8 w-full min-w-0'):
+                with ui.column():
+                    ui.label('Row ID').classes('text-caption text-grey')
+                    ui.label(str(rec.get('row_idx', '—')))
+                with ui.column().classes('min-w-0'):
+                    ui.label('Key digest').classes('text-caption text-grey')
+                    kd_full = str(rec.get('key_digest', '—'))
+                    kd_lbl = ui.label(kd_full).classes('font-mono truncate max-w-full')
+                    with kd_lbl:
+                        ui.tooltip(kd_full)
+                with ui.column():
+                    ui.label('Verdict').classes('text-caption text-grey')
+                    self._verdict_badge(rec.get('verdict'))
+                with ui.column():
+                    ui.label('Tokens used').classes('text-caption text-grey')
+                    ui.label(str(rec.get('tokens_used', '—')))
+                with ui.column():
+                    ui.label('Duration (s)').classes('text-caption text-grey')
+                    ui.label(str(rec.get('dur_s', '—')))
+                with ui.column():
+                    ui.label('Exit code').classes('text-caption text-grey')
+                    ui.label(str(rec.get('exit_code', '—')))
+
+            # Collapsible content sections (expansions instead of tabs)
+            with ui.column().classes('w-full min-w-0 gap-2'):
+                # SQL
+                pretty = sqlparse.format(rec.get('query', ''), reindent=True, keyword_case='upper')
+                with ui.expansion('SQL', icon='data_object', value=True).classes('w-full'):
+                    ui.code(pretty, language='sql').classes('m-0')
+
+                # Stacktrace
+                if (stack_text := '\n'.join(rec.get('stacktrace') or [])):
+                    with ui.expansion('Stacktrace', icon='troubleshoot', value=True).classes('w-full'):
+                        ui.codemirror(value=stack_text, line_wrapping=True).classes('w-full')
+
+                # Report
+                if (report_text := rec.get('last_message')):
+                    with ui.expansion('Report', icon='description', value=True).classes('w-full'):
+                        ui.markdown(report_text)
+
+                # stdout
+                if (stdout := rec.get('stdout')):
+                    with ui.expansion('stdout', icon='terminal').classes('w-full'):
+                        self.render_terminal(stdout)
+
+                # stderr
+                if (stderr := rec.get('stderr')):
+                    with ui.expansion('stderr', icon='terminal').classes('w-full'):
+                        self.render_terminal(stderr)
+
+                # Original prompt
+                if (prompt := rec.get('prompt')):
+                    with ui.expansion('Original prompt', icon='text_snippet').classes('w-full'):
+                        ui.codemirror(value=prompt, line_wrapping=True).classes('w-full prompt-cm')
 
     def _render_oracle_outputs(self, *, parent=None) -> None:
         """Render the oracle outputs tab contents inside the given parent or current context.
@@ -1158,62 +1260,7 @@ class App:
             def _render_record_detail(rec: dict) -> None:
                 details_container.clear()
                 with details_container:
-                    # Top metadata
-                    # Include row number plus metadata; make first data column wider for long digests
-                    with ui.grid().classes('grid-cols-[auto,2fr,1fr,1fr,1fr,1fr] gap-8 w-full min-w-0'):
-                        with ui.column():
-                            ui.label('Row ID').classes('text-caption text-grey')
-                            ui.label(str(rec['row_idx']))
-                        with ui.column().classes('min-w-0'):
-                            ui.label('Key digest').classes('text-caption text-grey')
-                            kd_full = str(rec.get('key_digest', '—'))
-                            kd_lbl = ui.label(kd_full).classes('font-mono truncate max-w-full')
-                            with kd_lbl:
-                                ui.tooltip(kd_full)
-                        with ui.column():
-                            ui.label('Verdict').classes('text-caption text-grey')
-                            self._verdict_badge(rec.get('verdict'))
-                        with ui.column():
-                            ui.label('Tokens used').classes('text-caption text-grey')
-                            ui.label(str(rec.get('tokens_used', '—')))
-                        with ui.column():
-                            ui.label('Duration (s)').classes('text-caption text-grey')
-                            ui.label(str(rec.get('dur_s', '—')))
-                        with ui.column():
-                            ui.label('Exit code').classes('text-caption text-grey')
-                            ui.label(str(rec.get('exit_code', '—')))
-
-                    # Collapsible content sections (expansions instead of tabs)
-                    with ui.column().classes('w-full min-w-0 gap-2'):
-                        # SQL
-                        pretty = sqlparse.format(rec.get('query', ''), reindent=True, keyword_case='upper')
-                        with ui.expansion('SQL', icon='data_object', value=True).classes('w-full'):
-                            ui.code(pretty, language='sql').classes('m-0')
-
-                        # Stacktrace
-                        if stack_text := '\n'.join(rec.get('stacktrace') or []):
-                            with ui.expansion('Stacktrace', icon='troubleshoot', value=True).classes('w-full'):
-                                ui.codemirror(value=stack_text, line_wrapping=True).classes('w-full')
-
-                        # Report
-                        if report_text := rec.get('last_message'):
-                            with ui.expansion('Report', icon='description', value=True).classes('w-full'):
-                                ui.markdown(report_text)
-
-                        # stdout
-                        if stdout := rec.get('stdout'):
-                            with ui.expansion('stdout', icon='terminal').classes('w-full'):
-                                self.render_terminal(stdout)
-
-                        # stderr
-                        if stderr := rec.get('stderr'):
-                            with ui.expansion('stderr', icon='terminal').classes('w-full'):
-                                self.render_terminal(stderr)
-
-                        # Original prompt
-                        if prompt := rec.get('prompt'):
-                            with ui.expansion('Original prompt', icon='text_snippet').classes('w-full'):
-                                ui.codemirror(value=prompt, line_wrapping=True).classes('w-full')
+                    self._render_oracle_record_details_content(rec)
 
             # Map by key_digest for robust lookup
             by_digest: Dict[str, dict] = {r['key_digest']: r for r in records}
