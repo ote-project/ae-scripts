@@ -34,4 +34,4 @@ WORKDIR /opt/$APP
 ENTRYPOINT ["bin/docker_entrypoint.sh"]
 EOF
 
-(cd "$DSE_DIR"; docker build -t "$APP-dse" -f "$dockerfile_path" .)
+(cd "$DSE_DIR"; docker build -t "${APP,,}-dse" -f "$dockerfile_path" .)

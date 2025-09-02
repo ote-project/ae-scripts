@@ -43,6 +43,7 @@ cd "$HOME/dse"
 (cd examples; git pull --ff-only)
 
 cd "concolic_driver"
+git pull --ff-only
 for exp in "${experiments[@]}"; do
     conf="$HOME/dse/examples/${exp}.conf"
     log="$HOME/dse/logs/${exp//_/-}-2r-${suffix}"
