@@ -320,8 +320,13 @@ class App:
         self.traces_table = None
         self.run_id_input = None
         self.timeline_container = None
+        self.oracle_container = None
         self.files_found_label = None
         self.index_status_container = None
+        self.main_tabs = None
+        self.tab_runs = None
+        self.tab_oracle = None
+        self.sidebar_runs = None
 
         self._build_ui()
         self._refresh_files_found()
@@ -377,22 +382,27 @@ class App:
         ui.add_css('#oracle-grid{width:100%!important;max-width:none!important}#oracle-grid .ag-root-wrapper{width:100%!important}')
         # Remove any implicit max-width on the main page container so content can use full width
         ui.add_css('.q-page, .q-page-container{max-width:none!important}')
+        # Make the page container use full height flexbox layout
+        ui.add_css('body, .q-app, .q-page-container, .q-page{height:100vh;display:flex;flex-direction:column}')
 
         # Top-level drawer (must not be nested under header)
         self._drawer = ui.left_drawer(value=True, fixed=True).classes('bg-grey-2')
 
         with self._drawer:
             with ui.column().classes('px-3 py-2 gap-2'):
-                self.files_found_label = ui.label('')
+                # Runs-only sidebar container (hidden on Oracle tab)
+                self.sidebar_runs = ui.column().classes('gap-2 w-full')
+                with self.sidebar_runs:
+                    self.files_found_label = ui.label('')
 
-                ui.separator()
-                ui.label('Index').classes('text-subtitle2')
+                    ui.separator()
+                    ui.label('Index').classes('text-subtitle2')
 
-                async def on_build_click():
-                    # Progress dialog
-                    with ui.dialog() as dlg, ui.card().classes('min-w-[500px]'):
-                        with ui.column().classes('gap-4 p-2'):
-                            ui.label('Building Index').classes('text-h6 text-center')
+                    async def on_build_click():
+                        # Progress dialog
+                        with ui.dialog() as dlg, ui.card().classes('min-w-[500px]'):
+                            with ui.column().classes('gap-4 p-2'):
+                                ui.label('Building Index').classes('text-h6 text-center')
 
                             with ui.row().classes('items-center justify-center gap-8'):
                                 ui.spinner(size='lg')
@@ -406,55 +416,56 @@ class App:
                                     lp = ui.linear_progress(value=0.0).classes('w-full')
                                     prog_label = ui.label('Waiting…').classes('text-caption text-grey')
 
-                    async def _run_build():
-                        q: queue.SimpleQueue[tuple[int, int, str]] = queue.SimpleQueue()
+                        async def _run_build():
+                            q: queue.SimpleQueue[tuple[int, int, str]] = queue.SimpleQueue()
 
-                        def _progress_cb(done: int, total: int, fname: str) -> None:
-                            try:
-                                q.put((done, total, fname))
-                            except Exception:
-                                pass
-
-                        # Periodically drain progress updates from the worker thread
-                        def _drain_queue():
-                            while True:
+                            def _progress_cb(done: int, total: int, fname: str) -> None:
                                 try:
-                                    done, total, fname = q.get_nowait()
-                                except queue.Empty:
-                                    break
-                                frac = (done / total) if total else 0.0
-                                lp.value = frac
-                                if fname:
-                                    disp = App.shorten_path_for_display(fname, self.data_dir)
-                                    prog_label.text = f"{done}/{total}  {disp}"
-                                else:
-                                    prog_label.text = f"{done}/{total}"
-                                lp.update()
-                                prog_label.update()
-                        timer = ui.timer(0.2, _drain_queue)
+                                    q.put((done, total, fname))
+                                except Exception:
+                                    pass
 
-                        dlg.open()
-                        # periodic UI updates while building in thread
-                        try:
-                            await asyncio.to_thread(
-                                build_full_index,
-                                data_dir=self.data_dir,
-                                index_path=self.index_path,
-                                threads=int(self.state.duckdb.threads),
-                                memory_limit=str(self.state.duckdb.memory_limit) or 'system',
-                                progress_cb=_progress_cb,
-                            )
-                            ui.notify('Index build complete', color='positive')
-                        except Exception as e:  # pragma: no cover
-                            ui.notify(f'Index build failed: {e}', color='negative', close_button=True)
-                        finally:
-                            dlg.close()
-                            timer.cancel()
-                            self._refresh_index_status()
-                            self.refresh_traces()
+                            # Periodically drain progress updates from the worker thread
+                            def _drain_queue():
+                                while True:
+                                    try:
+                                        done, total, fname = q.get_nowait()
+                                    except queue.Empty:
+                                        break
+                                    frac = (done / total) if total else 0.0
+                                    lp.value = frac
+                                    if fname:
+                                        disp = App.shorten_path_for_display(fname, self.data_dir)
+                                        prog_label.text = f"{done}/{total}  {disp}"
+                                    else:
+                                        prog_label.text = f"{done}/{total}"
+                                    lp.update()
+                                    prog_label.update()
+                            timer = ui.timer(0.2, _drain_queue)
 
-                    await _run_build()
+                            dlg.open()
+                            # periodic UI updates while building in thread
+                            try:
+                                await asyncio.to_thread(
+                                    build_full_index,
+                                    data_dir=self.data_dir,
+                                    index_path=self.index_path,
+                                    threads=int(self.state.duckdb.threads),
+                                    memory_limit=str(self.state.duckdb.memory_limit) or 'system',
+                                    progress_cb=_progress_cb,
+                                )
+                                ui.notify('Index build complete', color='positive')
+                            except Exception as e:  # pragma: no cover
+                                ui.notify(f'Index build failed: {e}', color='negative', close_button=True)
+                            finally:
+                                dlg.close()
+                                timer.cancel()
+                                self._refresh_index_status()
+                                self.refresh_traces()
 
+                        await _run_build()
+
+                    
                 ui.button('Build/Refresh Full Index', on_click=on_build_click).props('color=primary')
 
                 # Index status lives in the sidebar
@@ -519,12 +530,50 @@ class App:
                     ui.tooltip(_data_path)
             ui.space()
 
-        # Main content (make sure it can span the full width next to the drawer)
-        with ui.row().classes('px-4 py-2 gap-4 w-full max-w-none items-stretch').style('width: 100%'):
-            with ui.column().classes('w-full gap-3 max-w-none'):
+        # Main content with top-level tabs for Runs and Oracle
+        with ui.row().classes('px-4 py-2 gap-4 w-full max-w-none items-stretch flex-1').style('width: 100%'):
+            with ui.column().classes('w-full gap-3 max-w-none flex-1'):
+                with ui.tabs() as self.main_tabs:
+                    self.tab_runs = ui.tab('Runs')
+                    self.tab_oracle = ui.tab('Oracle')
 
-                # Timeline container
-                self.timeline_container = ui.column().classes('gap-2 w-full')
+                with ui.tab_panels(self.main_tabs, value=self.tab_runs).classes('w-full flex-1'):
+                    with ui.tab_panel(self.tab_runs):
+                        # Timeline container for run details
+                        self.timeline_container = ui.column().classes('gap-2 w-full flex-1')
+                    with ui.tab_panel(self.tab_oracle):
+                        # Global Oracle view (independent of runs/index)
+                        self.oracle_container = ui.column().classes('w-full flex-1')
+                        with self.oracle_container:
+                            self._render_oracle_outputs(parent=self.oracle_container)
+
+                # Toggle sidebar visibility when switching tabs (show only on Runs)
+                def _toggle_sidebar_for_tab(val) -> None:
+                    is_runs = (val == self.tab_runs) or (getattr(val, 'text', None) == 'Runs') or (val == 'Runs')
+                    if self.sidebar_runs is None:
+                        return
+                    try:
+                        self.sidebar_runs.visible = bool(is_runs)
+                        self.sidebar_runs.update()
+                    except Exception:
+                        # Fallback for older NiceGUI: flip display style
+                        if is_runs:
+                            self.sidebar_runs.style('display:flex')
+                        else:
+                            self.sidebar_runs.style('display:none')
+                    # Also open/close the drawer itself to fully hide the sidebar on Oracle
+                    try:
+                        self._drawer.value = bool(is_runs)
+                        self._drawer.update()
+                    except Exception:
+                        pass
+
+                # Initial state: Runs tab -> show sidebar
+                _toggle_sidebar_for_tab(self.tab_runs)
+                try:
+                    self.main_tabs.on_value_change(lambda e: _toggle_sidebar_for_tab(getattr(e, 'value', None)))
+                except Exception:
+                    pass
 
     # ------------- Callbacks -------------
 
@@ -692,19 +741,10 @@ class App:
         # Header metrics
         self._render_run_summary(summary, run_id)
 
-        # Tabs for run detail: Trace and Query Oracle Outputs
+        # Run detail content: Trace only (Oracle moved to top-level tab)
         with self.timeline_container:
-            with ui.tabs() as tabs:
-                tab_trace = ui.tab('Trace')
-                tab_oracle = ui.tab('Query Oracle')
-            with ui.tab_panels(tabs, value=tab_trace).classes('w-full min-w-0 flex-1 overflow-y-auto').style('max-height: 70vh'):
-                with ui.tab_panel(tab_trace):
-                    with ui.column().classes('gap-2') as trace_panel:
-                        self._render_events(ev_df, parent=trace_panel)
-                # Make sure the Oracle panel also stretches fully
-                with ui.tab_panel(tab_oracle).classes('w-full min-w-0'):
-                    with ui.column().classes('gap-2 w-full') as oracle_panel:
-                        self._render_oracle_outputs(parent=oracle_panel)
+            with ui.column().classes('gap-2') as trace_panel:
+                self._render_events(ev_df, parent=trace_panel)
 
     def _render_run_summary(self, summary, run_id: int) -> None:
         with self.timeline_container:
@@ -1071,6 +1111,7 @@ class App:
         - Summary ag-grid is single-select only.
         - Clicking a row renders only that record's details below the table.
         - Initial state shows no record details.
+        - AgGrid is displayed in a scrollable container showing all rows.
         """
         container = parent or self.timeline_container
         records, chosen_dir = self._load_oracle_records()
@@ -1081,10 +1122,6 @@ class App:
                     msg += " Expected directory 'oracle-logs'."
                 ui.label(msg).classes('text-caption text-grey')
                 return
-
-            # Directory context
-            # if chosen_dir is not None:
-            #     ui.label(f"Loaded {len(records)} record(s) from {str(chosen_dir)}.").classes('text-caption text-grey')
 
             # Summary chart (single stacked horizontal bar)
             counts = Counter(r['verdict'] for r in records)
@@ -1147,19 +1184,12 @@ class App:
 
             ui.separator()
 
-            # Set a reasonable visible height (~N rows); header stays fixed while body scrolls
-            _GRID_VISIBLE_ROWS = 8
-            _row_h = 36
-            _hdr_h = 36
-            _grid_height_px = int(_hdr_h + _row_h * _GRID_VISIBLE_ROWS + 2)  # small fudge for borders
-
+            # AgGrid in a scrollable container showing all rows
             grid = ui.aggrid({
                 'defaultColDef': {
                     'resizable': True,
                     'sortable': True,
                 },
-                'rowHeight': _row_h,
-                'headerHeight': _hdr_h,
                 'animateRows': True,
                 'ensureDomOrder': True,
                 'suppressCellFocus': True,
@@ -1172,7 +1202,6 @@ class App:
                         'pinned': 'left', 'sortable': False, 'resizable': False,
                         'suppressMenu': True,
                         'type': 'rightAligned', 'cellClass': 'text-right text-grey',
-                        'cellStyle': 'function(){ return {textAlign: "right", fontVariantNumeric: "tabular-nums"}; }',
                     },
                     {
                         'headerName': 'Query', 'field': 'query',
@@ -1194,93 +1223,54 @@ class App:
                     {
                         'headerName': 'Duration (s)', 'field': 'dur_s',
                         'width': 110, 'minWidth': 100,
-                        'type': 'rightAligned', 'cellClass': 'text-right',
-                        'cellStyle': 'function(){ return {textAlign: "right", fontVariantNumeric: "tabular-nums"}; }',
-                        'valueFormatter': (
-                            'function(params){'
-                            '  const v = params.value;'
-                            '  if (v == null) return "";'
-                            '  const n = Number(v);'
-                            '  return Number.isFinite(n) ? n.toFixed(3) : String(v);'
-                            '}'
-                        )
+                        'type': 'numericColumn',
                     },
                     {
                         'headerName': 'Tokens', 'field': 'tokens_used',
                         'width': 140, 'minWidth': 120,
-                        'type': 'rightAligned', 'cellClass': 'text-right',
-                        'cellStyle': 'function(){ return {textAlign: "right", fontVariantNumeric: "tabular-nums"}; }',
-                        'valueFormatter': (
-                            'function(params){'
-                            '  const v = params.value;'
-                            '  if (v == null) return "";'
-                            '  const n = Number(v);'
-                            '  return Number.isFinite(n) ? n.toLocaleString() : String(v);'
-                            '}'
-                        )
+                        'type': 'numericColumn',
                     },
-                    {'headerName': 'Exit', 'field': 'exit_code', 'width': 80, 'minWidth': 70, 'type': 'rightAligned', 'cellClass': 'text-right'},
+                    {'headerName': 'Exit', 'field': 'exit_code', 'width': 80, 'minWidth': 70, 'type': 'numericColumn'},
                 ],
                 'rowData': records,
-                # Ensure single selection; we still pass key_digest in row data for lookup
                 'rowSelection': 'single',
-                # When data is rendered, auto-size all columns except Query to fit content
-                'onGridReady': (
-                    'function(params){'
-                    '  const all = params.columnApi.getAllColumns().map(c => c.getColId());'
-                    '  const toSize = all.filter(id => id !== "query");'
-                    '  params.columnApi.autoSizeColumns(toSize, false);'
-                    '  if (params.api && params.api.sizeColumnsToFit) {'
-                    '    setTimeout(() => params.api.sizeColumnsToFit(), 0);'
-                    '  }'
-                    '}'
-                ),
-                'onFirstDataRendered': (
-                    'function(params){'
-                    '  if (params.api && params.api.sizeColumnsToFit) {'
-                    '    params.api.sizeColumnsToFit();'
-                    '  }'
-                    '}'
-                ),
-                'onGridSizeChanged': (
-                    'function(params){'
-                    '  if (params.api && params.api.sizeColumnsToFit) {'
-                    '    params.api.sizeColumnsToFit();'
-                    '  }'
-                    '}'
-                ),
-            }).props('id=oracle-grid').classes('w-full max-w-none').style(f'width: 100%; height: {_grid_height_px}px')
+                'domLayout': 'autoHeight',
+            }).classes('w-full max-w-none flex-1')
 
-            ui.separator()
-            ui.label('Record Details').classes('text-subtitle2')
+            # Pre-create a fullscreen dialog for record details (opened on double-click)
+            with ui.dialog() as rec_dlg:
+                rec_dlg.props('maximized')
+                with ui.card().classes('w-screen h-screen max-w-none max-h-none p-2 flex flex-col gap-2 overflow-hidden'):
+                    with ui.row().classes('items-center justify-between w-full'):
+                        ui.label('Oracle Record Details').classes('text-subtitle1')
+                        ui.button(icon='close', on_click=rec_dlg.close).props('flat round dense')
+                    # Scrollable content area
+                    rec_dlg_container = ui.element('div').classes('flex-1 min-h-0 w-full overflow-auto')
 
-            # Empty container initially; filled when a row is clicked
-            details_container = ui.column().classes('gap-2 w-full')
-
-            def _render_record_detail(rec: dict) -> None:
-                details_container.clear()
-                with details_container:
+            def _open_dialog_with_record(rec: dict) -> None:
+                # Re-render dialog content for the selected record and open
+                rec_dlg_container.clear()
+                with rec_dlg_container:
                     self._render_oracle_record_details_content(rec)
+                rec_dlg.open()
 
             # Map by key_digest for robust lookup
             by_digest: Dict[str, dict] = {r['key_digest']: r for r in records}
 
-            def _on_row_selected(e):
-                # Ignore rowSelected events for rows being deselected
+            def _on_row_double_clicked(data):
                 try:
-                    a = getattr(e, 'args', None) or {}
-                    sel = a.get('selected')
-                    if isinstance(sel, bool) and not sel:
+                    kd = data.get('key_digest') if isinstance(data, dict) else None
+                    if kd is None:
                         return
+                    rec = by_digest.get(kd)
+                    if rec is None:
+                        return
+                    _open_dialog_with_record(rec)
                 except Exception:
                     pass
 
-                key_digest = e.args['data']['key_digest']
-                rec = by_digest[key_digest]
-                _render_record_detail(rec)
-
-            # Bind events; guard against deselection in the handler
-            grid.on('rowSelected', _on_row_selected)
+            # Bind events; on double-click open fullscreen dialog with details
+            grid.on('rowDoubleClicked', _on_row_double_clicked, args=['data'])
 
 
 def _run_dir(s: str) -> Path:
