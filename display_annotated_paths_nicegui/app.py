@@ -563,14 +563,15 @@ class App:
                 with _path_lbl:
                     ui.tooltip(_data_path)
             ui.space()
+            # Place the main tabs in the header so they appear above the sidebar
+            with ui.tabs() as self.main_tabs:
+                self.tab_runs = ui.tab('Runs')
+                self.tab_oracle = ui.tab('Oracle')
 
         # Main content with top-level tabs for Runs and Oracle
         with ui.row().classes('px-4 py-2 gap-4 w-full max-w-none items-stretch flex-1').style('width: 100%'):
             with ui.column().classes('w-full gap-3 max-w-none flex-1'):
-                with ui.tabs() as self.main_tabs:
-                    self.tab_runs = ui.tab('Runs')
-                    self.tab_oracle = ui.tab('Oracle')
-
+                # Panels are driven by the tabs in the header
                 with ui.tab_panels(self.main_tabs, value=self.tab_runs).classes('w-full flex-1'):
                     with ui.tab_panel(self.tab_runs):
                         # Timeline container for run details
