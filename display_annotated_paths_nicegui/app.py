@@ -1257,19 +1257,40 @@ class App:
             # Map by key_digest for robust lookup
             by_digest: Dict[str, dict] = {r['key_digest']: r for r in records}
 
-            def _on_row_double_clicked(data):
+            def _on_row_double_clicked(e):
+                """Open fullscreen dialog for the double-clicked row.
+
+                NiceGUI passes an EventArguments object; extract the row data
+                from e.args in a robust way across NiceGUI/AG Grid versions.
+                """
                 try:
+                    data = None
+                    # Preferred: we explicitly requested 'data' via args (see .on below)
+                    if hasattr(e, 'args'):
+                        if isinstance(e.args, dict):
+                            data = e.args.get('data') or e.args.get('row')
+                        # Some versions may pass the value directly
+                        elif isinstance(e.args, list) and e.args:
+                            data = e.args[0]
+                    # Fallbacks: AG Grid events commonly expose node.data or just data
+                    if data is None and hasattr(e, 'args') and isinstance(e.args, dict):
+                        node = e.args.get('node')
+                        if isinstance(node, dict):
+                            data = node.get('data')
+
                     kd = data.get('key_digest') if isinstance(data, dict) else None
-                    if kd is None:
+                    if not kd:
                         return
                     rec = by_digest.get(kd)
-                    if rec is None:
+                    if not rec:
                         return
                     _open_dialog_with_record(rec)
                 except Exception:
+                    # Swallow errors to avoid breaking UI event loop
                     pass
 
             # Bind events; on double-click open fullscreen dialog with details
+            # Request only the row "data" field to minimize payload
             grid.on('rowDoubleClicked', _on_row_double_clicked, args=['data'])
 
 
