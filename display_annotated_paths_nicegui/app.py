@@ -31,11 +31,16 @@ class Verdict(Enum):
 
 
 # ------------------ Data & Indexing ------------------
-INPUT_FILE_GLOB_PATTERN = "paths-*.json.gz"
+# Accept both gzip and zstd compressed JSON inputs
+# Example filenames: paths-*.json.gz, paths-*.json.zst
+INPUT_FILE_GLOB_PATTERNS = [
+    "paths-*.json.zst",
+    "paths-*.json.gz",
+]
 EVENT_SHARDS_DIRNAME = 'event_shards'
 
 def _write_events_shard(json_file: str, out_dir: str) -> str:
-    """Worker: read one JSON(.gz) file, transform to event rows, and write a Parquet shard.
+    """Worker: read one JSON(.gz|.zst) file, transform to event rows, and write a Parquet shard.
     Returns the output shard path.
     """
     # Local import of duckdb to keep worker minimal
@@ -43,7 +48,7 @@ def _write_events_shard(json_file: str, out_dir: str) -> str:
     import os
     # Deterministic shard name from source file
     base = os.path.basename(json_file)
-    name, _ = os.path.splitext(base)  # .gz or .json.gz -> leave trailing .gz trimmed
+    name, _ = os.path.splitext(base)  # .gz/.zst or .json.gz/.json.zst -> leave trailing compressed ext trimmed
     if name.endswith('.json'):
         name = name[:-5]
     shard_path = os.path.join(out_dir, f"{name}.parquet")
@@ -85,8 +90,36 @@ def _write_events_shard(json_file: str, out_dir: str) -> str:
 
 
 def _list_input_files(data_dir: Path | str) -> List[str]:
+    """Return a sorted list of input files.
+
+    Raises ValueError if duplicates exist for the same base name across
+    compression extensions (e.g., both .json.gz and .json.zst present).
+    """
     base = Path(data_dir).expanduser()
-    return sorted([str(p) for p in base.glob(INPUT_FILE_GLOB_PATTERN)])
+
+    def _stem_for(p: Path) -> str:
+        # Mirror shard naming logic: drop last ext, then drop trailing .json
+        name, _ = os.path.splitext(p.name)
+        return name[:-5] if name.endswith('.json') else name
+
+    by_key: dict[str, List[Path]] = {}
+    for pat in INPUT_FILE_GLOB_PATTERNS:
+        for p in base.glob(pat):
+            key = _stem_for(p)
+            by_key.setdefault(key, []).append(p)
+
+    # Detect duplicates where more than one file maps to the same key
+    duplicates = {k: v for k, v in by_key.items() if len(v) > 1}
+    if duplicates:
+        parts: List[str] = []
+        for k, paths in duplicates.items():
+            listed = ', '.join(sorted(str(x.name) for x in paths))
+            parts.append(f"{k}: [{listed}]")
+        details = '; '.join(parts)
+        raise ValueError(f"duplicate inputs for base name(s): {details}")
+
+    files = [p for lst in by_key.values() for p in lst]
+    return [str(p) for p in sorted(files, key=lambda x: x.name)]
 
 
 def build_full_index(
@@ -106,7 +139,7 @@ def build_full_index(
         con.execute("PRAGMA memory_limit=?", [memory_limit])
         con.execute("PRAGMA temp_directory=?", [tmpdir])
 
-        # ---------- MAP: JSON(.gz) -> Parquet shards (in parallel) ----------
+        # ---------- MAP: JSON(.gz|.zst) -> Parquet shards (in parallel) ----------
         files = _list_input_files(data_dir)
         total = len(files)
         if progress_cb is not None:
@@ -371,10 +404,10 @@ class App:
     def _build_ui(self) -> None:
         # Global CSS tweaks for CodeMirror sizing and stability
         ui.add_css('.cm-editor{width:100%}.cm-scroller{overflow:auto}.cm-content{min-width:0!important}')
-        # Min height for non-dialog stacktrace editors (e.g., in Oracle tab)
-        ui.add_css('.stacktrace-cm .cm-editor{min-height:24rem}')
         # Make the Original prompt editor taller by default
         ui.add_css('.prompt-cm .cm-editor{min-height:18rem}')
+        # Make the Stacktrace editor taller by default
+        ui.add_css('.stacktrace-cm .cm-editor{min-height:18rem}')
         # Large fixed height for stacktrace shown in dialog
         # In dialog, let the editor fill the remaining space of a flex column layout
         ui.add_css('.stacktrace-dialog .cm-editor{height:100%}')
@@ -478,7 +511,8 @@ class App:
                 ui.label('Run').classes('text-subtitle2')
                 # Use precision=0 for UX; keep in sync with main run change handler
                 self.run_id_input = ui.number('Run ID', value=0, precision=0).props('dense')
-                self.run_id_input.on('change', lambda e: self._on_run_change(e.value))
+                # NiceGUI's generic change event doesn't provide e.value; read from the component instead
+                self.run_id_input.on('change', lambda e: self._on_run_change(self.run_id_input.value))
 
                 ui.separator()
                 sql_input = ui.input('SQL contains', value=self.state.sql_sub)
@@ -614,8 +648,11 @@ class App:
     def _refresh_files_found(self) -> None:
         if not self.files_found_label:
             return
-        n = len(_list_input_files(self.data_dir))
-        self.files_found_label.text = f"Found {n} data files"
+        try:
+            n = len(_list_input_files(self.data_dir))
+            self.files_found_label.text = f"Found {n} data files"
+        except ValueError as e:
+            self.files_found_label.text = f"Input error: {e}"
         self.files_found_label.update()
 
     def _refresh_index_status(self) -> None:
@@ -1082,12 +1119,18 @@ class App:
                 # Stacktrace
                 if (stack_text := '\n'.join(rec.get('stacktrace') or [])):
                     with ui.expansion('Stacktrace', icon='troubleshoot', value=True).classes('w-full'):
-                        ui.codemirror(value=stack_text, line_wrapping=True).classes('w-full')
+                        ui.codemirror(value=stack_text, line_wrapping=True).classes('w-full stacktrace-cm')
 
                 # Report
                 if (report_text := rec.get('last_message')):
+                    # If the report begins with a verdict label, drop it (and any whitespace)
+                    cleaned_report = re.sub(r'^\s*(?:RELEVANT|IRRELEVANT|UNSURE)\s*', '', str(report_text), count=1, flags=re.IGNORECASE)
                     with ui.expansion('Report', icon='description', value=True).classes('w-full'):
-                        ui.markdown(report_text)
+                        # Be defensive around Markdown rendering only
+                        try:
+                            ui.markdown(cleaned_report)
+                        except Exception:
+                            ui.label(cleaned_report)
 
                 # stdout
                 if (stdout := rec.get('stdout')):
@@ -1300,8 +1343,13 @@ def _run_dir(s: str) -> Path:
         raise argparse.ArgumentTypeError(f"run directory not found: {p}")
     if not (paths_dir := (p / 'annotated-paths')).is_dir():
         raise argparse.ArgumentTypeError(f"run directory does not contain 'annotated-paths' subdirectory: {p}")
-    if not any(paths_dir.glob(INPUT_FILE_GLOB_PATTERN)):
-        raise argparse.ArgumentTypeError(f"no '{INPUT_FILE_GLOB_PATTERN}' files found in '{paths_dir}'")
+    try:
+        files = _list_input_files(paths_dir)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+    if not files:
+        pats = ', '.join(INPUT_FILE_GLOB_PATTERNS)
+        raise argparse.ArgumentTypeError(f"no input files matching any of [{pats}] found in '{paths_dir}'")
     return p.expanduser()
 
 
