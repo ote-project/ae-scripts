@@ -808,12 +808,14 @@ class App:
                 ui.label(f"Run {int(run_id)} not found in index").classes('text-negative')
 
     @staticmethod
-    def _render_stacktrace(elem: dict, *, compact: bool = False) -> None:
+    def _render_stacktrace(elem: dict, *, compact: bool = False, pretty_by_qi: Optional[Dict[int, str]] = None) -> None:
         """Render a button that opens a large dialog showing the stacktrace (if present).
 
         Args:
             elem: Event element dict which may contain 'stacktrace'.
             compact: If True, render a small, subtle inline icon button suitable for inline use.
+            pretty_by_qi: Optional mapping of query index to pretty SQL, used to render
+                rich QRV tooltips if the element is a PathConditionAtom.
         """
         stack_val = elem.get('stacktrace')
         if not stack_val:
@@ -827,12 +829,53 @@ class App:
 
         # Pre-create dialog and a button to open it
         with ui.dialog() as dlg:
-            dlg.props('maximized')
+            # Prevent refocus on close to avoid page scroll jumps
+            dlg.props('maximized no-refocus')
             # Fullscreen card with flex column to pin footer at bottom
             with ui.card().classes('w-screen h-screen max-w-none max-h-none p-2 flex flex-col gap-2'):
                 with ui.row().classes('items-center justify-between w-full'):
                     ui.label('Stacktrace').classes('text-subtitle1')
                     ui.button(icon='close', on_click=dlg.close).props('flat round dense')
+                # If this is a PathConditionAtom, show its condition above the stacktrace
+                try:
+                    if elem.get('$type') == 'PathConditionAtom' and 'cond' in elem:
+                        # Render condition inline with optional QRV tooltips
+                        with ui.column().classes('gap-1 w-full'):
+                            ui.label('Condition').classes('text-caption text-grey')
+                            # Compute fragments; prefix '!' if outcome is False
+                            frags = term_to_frags(elem.get('cond'))
+                            if elem.get('outcome') is False:
+                                frags = [{'kind': 'text', 'text': '!'}] + frags
+                            if pretty_by_qi:
+                                with ui.row().classes('items-center gap-1 flex-wrap'):
+                                    render_frags(frags, pretty_by_qi=pretty_by_qi)
+                            else:
+                                # Fallback to plain text if we don't have query pretties
+                                text = ''.join(f.get('text', '') for f in frags)
+                                ui.html(f'<span class="font-mono text-sm">{html.escape(text)}</span>')
+                    elif elem.get('$type') == 'SqlQueryDecl' and 'query' in elem:
+                        # Show the SQL query above the stacktrace
+                        with ui.column().classes('gap-1 w-full'):
+                            ui.label('Query').classes('text-caption text-grey')
+                            try:
+                                qi = int(elem.get('qIdx', {}).get('value'))
+                            except Exception:
+                                qi = None
+                            # If we know qi, show the standard Q badge
+                            if qi is not None:
+                                with ui.row().classes('items-start gap-2'):
+                                    _q_badge(qi)
+                                    pretty = (
+                                        (pretty_by_qi or {}).get(qi)
+                                        or sqlparse.format(elem['query'], reindent=True, keyword_case='upper')
+                                    )
+                                    ui.code(pretty, language='sql').classes('m-0')
+                            else:
+                                pretty = sqlparse.format(elem['query'], reindent=True, keyword_case='upper')
+                                ui.code(pretty, language='sql').classes('m-0')
+                except Exception:
+                    # Be robust: failure to render condition shouldn't break stacktrace dialog
+                    pass
                 # Growing content area that the editor will fill
                 with ui.element('div').classes('flex-1 min-h-0 w-full'):
                     ui.codemirror(value=stack_text, line_wrapping=True).classes('w-full h-full stacktrace-dialog')
@@ -904,7 +947,8 @@ class App:
                                         badge = self._verdict_badge(rec.get('verdict')).classes('cursor-pointer')
                                         # Click badge to open a fullscreen dialog with oracle details
                                         with ui.dialog() as dlg:
-                                            dlg.props('maximized')
+                                            # Prevent refocus on close to avoid page scroll jumps
+                                            dlg.props('maximized no-refocus')
                                             # Fullscreen card; flex column with scrollable content area
                                             with ui.card().classes('w-screen h-screen max-w-none max-h-none p-2 flex flex-col gap-2 overflow-hidden'):
                                                 with ui.row().classes('items-center justify-between w-full'):
@@ -927,14 +971,14 @@ class App:
                                     with ui.row().classes('items-center gap-2 min-w-0 self-center'):
                                         ui.code(one_line, language='sql').classes('m-0 p-0 whitespace-nowrap min-w-0 self-center flex-1')
                                         # compact inline stacktrace button
-                                        self._render_stacktrace(elem, compact=True)
+                                        self._render_stacktrace(elem, compact=True, pretty_by_qi=pretty_by_qi)
                                 else:
                                     pretty = sqlparse.format(elem['query'], reindent=True, keyword_case='upper')
                                     with ui.row().classes('items-start gap-2 min-w-0'):
                                         with ui.element('div').classes('flex-1 min-w-0'):
                                             ui.code(pretty, language='sql').classes('mt-0 min-w-0')
                                         # compact inline stacktrace button
-                                        self._render_stacktrace(elem, compact=True)
+                                        self._render_stacktrace(elem, compact=True, pretty_by_qi=pretty_by_qi)
 
                                 # Row 2: Parameters start under the badge (col 2), spanning cols 2-3
                                 params = elem['params']
@@ -985,7 +1029,7 @@ class App:
                                 with ui.row().classes('items-center gap-1 flex-wrap flex-1 min-w-0'):
                                     render_frags(frags, pretty_by_qi=pretty_by_qi)
                                 # Compact stacktrace button flush to the right
-                                self._render_stacktrace(elem, compact=True)
+                                self._render_stacktrace(elem, compact=True, pretty_by_qi=pretty_by_qi)
                     case _:
                         raise ValueError(f"Unknown event type: {r['type']}")
 
@@ -1283,7 +1327,8 @@ class App:
 
             # Pre-create a fullscreen dialog for record details (opened on double-click)
             with ui.dialog() as rec_dlg:
-                rec_dlg.props('maximized')
+                # Prevent refocus on close to avoid page scroll jumps
+                rec_dlg.props('maximized no-refocus')
                 with ui.card().classes('w-screen h-screen max-w-none max-h-none p-2 flex flex-col gap-2 overflow-hidden'):
                     with ui.row().classes('items-center justify-between w-full'):
                         ui.label('Oracle Record Details').classes('text-subtitle1')
