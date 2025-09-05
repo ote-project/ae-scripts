@@ -47,9 +47,6 @@ def _write_events_shard(json_file: str, out_dir: str) -> str:
     """Worker: read one JSON(.gz|.zst) file, transform to event rows, and write a Parquet shard.
     Returns the output shard path.
     """
-    # Local import of duckdb to keep worker minimal
-    import duckdb as _dd
-    import os
     # Deterministic shard name from source file
     base = os.path.basename(json_file)
     name, _ = os.path.splitext(base)  # .gz/.zst or .json.gz/.json.zst -> leave trailing compressed ext trimmed
@@ -58,7 +55,7 @@ def _write_events_shard(json_file: str, out_dir: str) -> str:
     shard_path = os.path.join(out_dir, f"{name}.parquet")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        con = _dd.connect()
+        con = duckdb.connect()
         # Constrain each worker to a single DuckDB thread to avoid per-worker thread blow-up
         con.execute("PRAGMA threads=1;")
         con.execute("PRAGMA temp_directory=?", [tmpdir])
@@ -138,13 +135,6 @@ def build_full_index(
 ) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
-        tmp_index_path = tmpdir_path / "ap_index.duckdb"
-
-        con = duckdb.connect(str(tmp_index_path))
-        con.execute("PRAGMA threads=?", [int(threads)])
-        con.execute("PRAGMA preserve_insertion_order=?", [False])
-        con.execute("PRAGMA memory_limit=?", [memory_limit])
-        con.execute("PRAGMA temp_directory=?", [tmpdir])
 
         # ---------- MAP: JSON(.gz|.zst) -> Parquet shards (in parallel) ----------
         files = _list_input_files(data_dir)
@@ -160,7 +150,7 @@ def build_full_index(
 
         # Fan out per-file workers
         done = 0
-        with concurrent.futures.ProcessPoolExecutor() as pool:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=threads) as pool:
             futs = [pool.submit(_write_events_shard, f, str(sys_tmp_shards_dir)) for f in files]
             for fut in concurrent.futures.as_completed(futs):
                 # Propagate errors early if any
@@ -189,9 +179,12 @@ def build_full_index(
         if progress_cb is not None:
             progress_cb(total, total, 'reducing: building views…')
 
-        con.execute("DROP VIEW IF EXISTS events;")
-        con.execute("DROP VIEW IF EXISTS traces;")
-        con.execute("DROP VIEW IF EXISTS queries;")
+        tmp_index_path = tmpdir_path / "ap_index.duckdb"
+        con = duckdb.connect(str(tmp_index_path))
+        con.execute("PRAGMA threads=?", [threads])
+        con.execute("PRAGMA preserve_insertion_order=?", [False])
+        con.execute("PRAGMA memory_limit=?", [memory_limit])
+        con.execute("PRAGMA temp_directory=?", [tmpdir])
 
         shards_glob = str((final_shards_dir / '*.parquet').as_posix())
         # Events view directly over parquet shards
