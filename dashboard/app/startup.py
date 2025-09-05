@@ -57,40 +57,42 @@ def _write_events_shard(json_file: str, out_dir: str) -> str:
         name = name[:-5]
     shard_path = os.path.join(out_dir, f"{name}.parquet")
 
-    con = _dd.connect()
-    # Constrain each worker to a single DuckDB thread to avoid per-worker thread blow-up
-    con.execute("PRAGMA threads=1;")
-    con.execute("PRAGMA preserve_insertion_order=false;")
-    # Materialize the transformed rows directly to Parquet
-    dest = shard_path.replace("'", "''")
-    con.execute(
-        f"""
-        COPY (
-            WITH r AS (
-                SELECT * FROM read_json(?, records=true, filename=true)
-            ),
-            exploded AS (
+    with tempfile.TemporaryDirectory() as tmpdir:
+        con = _dd.connect()
+        # Constrain each worker to a single DuckDB thread to avoid per-worker thread blow-up
+        con.execute("PRAGMA threads=1;")
+        con.execute("PRAGMA temp_directory=?", [tmpdir])
+        con.execute("PRAGMA preserve_insertion_order=false;")
+        # Materialize the transformed rows directly to Parquet
+        dest = shard_path.replace("'", "''")
+        con.execute(
+            f"""
+            COPY (
+                WITH r AS (
+                    SELECT * FROM read_json(?, records=true, filename=true)
+                ),
+                exploded AS (
+                    SELECT
+                        r.runId::BIGINT  AS runId,
+                        r.filename::TEXT AS file,
+                        i::INTEGER       AS event_idx,
+                        json(list_extract(r.aes, i+1)) AS record
+                    FROM r, range(array_length(r.aes)) AS idx(i)
+                )
                 SELECT
-                    r.runId::BIGINT  AS runId,
-                    r.filename::TEXT AS file,
-                    i::INTEGER       AS event_idx,
-                    json(list_extract(r.aes, i+1)) AS record
-                FROM r, range(array_length(r.aes)) AS idx(i)
-            )
-            SELECT
-                runId,
-                file,
-                event_idx,
-                json_extract(record, '$.elem')       AS elem,
-                json_extract_string(elem, '$.$type') AS type,
-                json_extract_string(record, '$.vacuousness')::ENUM ('Vacuous', 'NonVacuous') AS vacuousness,
-                json_extract_string(record, '$.oracleDigest') AS oracle_digest
-            FROM exploded
-        ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
-        """,
-        [json_file],
-    )
-    con.close()
+                    runId,
+                    file,
+                    event_idx,
+                    json_extract(record, '$.elem')       AS elem,
+                    json_extract_string(elem, '$.$type') AS type,
+                    json_extract_string(record, '$.vacuousness')::ENUM ('Vacuous', 'NonVacuous') AS vacuousness,
+                    json_extract_string(record, '$.oracleDigest') AS oracle_digest
+                FROM exploded
+            ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
+            """,
+            [json_file],
+        )
+        con.close()
     return os.path.abspath(shard_path)
 
 
