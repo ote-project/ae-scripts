@@ -917,6 +917,9 @@ class App:
 
             row_counters: Counter[int] = Counter()
             current_query_card = None
+            # When the current SqlQueryDecl has an Irrelevant verdict badge shown,
+            # suppress vacuousness badges for its subsidiaries until the End.
+            current_query_irrelevant_badged = False
 
             for _, r in ev_df.iterrows():
                 elem = r['elem']
@@ -926,6 +929,13 @@ class App:
                         qi = elem['qIdx']['value']
                         if current_query_card is not None:
                             raise ValueError(f"Unexpected nested SqlQueryDecl for Q{qi}")
+                        # Determine if this query has an oracle verdict badge and if it is Irrelevant
+                        try:
+                            od = r.get('oracle_digest') if isinstance(r, dict) else r['oracle_digest']
+                        except Exception:
+                            od = None
+                        rec = oracle_by_digest.get(od) if od else None
+                        current_query_irrelevant_badged = bool(rec is not None and rec.get('verdict') == Verdict.IRRELEVANT)
                         with (current_query_card := ui.card().props(f'id=q-{qi}').classes('w-full')):
                             # 3-column grid: [index] [Q badge] [content]. Parameters begin under the badge (col 2).
                             one_line = ' '.join(elem['query'].splitlines())
@@ -938,11 +948,7 @@ class App:
                                 with ui.row().classes('items-center gap-2' + (' self-center' if is_short else '')):
                                     _q_badge(qi)
                                     # If linked oracle record is found, show a clickable verdict badge
-                                    try:
-                                        od = r.get('oracle_digest') if isinstance(r, dict) else r['oracle_digest']
-                                    except Exception:
-                                        od = None
-                                    rec = oracle_by_digest.get(od) if od else None
+                                    # (rec computed above)
                                     if rec is not None:
                                         badge = self._verdict_badge(rec.get('verdict')).classes('cursor-pointer')
                                         # Click badge to open a fullscreen dialog with oracle details
@@ -1001,7 +1007,8 @@ class App:
                             row_counters[qi] += 1
                             with ui.row().classes('items-center gap-2 pl-6'):
                                 ui.label(f"[{int(r['event_idx'])}]").classes('text-caption text-grey')
-                                _vac_badge(r['vacuousness'])
+                                if not current_query_irrelevant_badged:
+                                    _vac_badge(r['vacuousness'])
                                 ui.label(f"Q{qi}R{row_id}").classes('font-mono text-sm')
                     case 'SqlQueryResEnd':
                         qi = elem['qIdx']['value']
@@ -1010,9 +1017,11 @@ class App:
                         with current_query_card:
                             with ui.row().classes('items-center gap-2 pl-6'):
                                 ui.label(f"[{int(r['event_idx'])}]").classes('text-caption text-grey')
-                                _vac_badge(r['vacuousness'])
+                                if not current_query_irrelevant_badged:
+                                    _vac_badge(r['vacuousness'])
                                 ui.label("(End)")
                         current_query_card = None
+                        current_query_irrelevant_badged = False
                     case 'PathConditionAtom':
                         if current_query_card is not None:
                             raise ValueError("PathConditionAtom inside SqlQueryDecl")
@@ -1167,7 +1176,7 @@ class App:
                         ui.codemirror(value=stack_text, line_wrapping=True).classes('w-full stacktrace-cm')
 
                 # Report
-                if (report_text := rec.get('last_message')):
+                if report_text := (rec.get('report') or rec.get('last_message')):
                     # If the report begins with a verdict label, drop it (and any whitespace)
                     cleaned_report = re.sub(r'^\s*(?:RELEVANT|IRRELEVANT|UNSURE)\s*', '', str(report_text), count=1, flags=re.IGNORECASE)
                     with ui.expansion('Report', icon='description', value=True).classes('w-full'):
