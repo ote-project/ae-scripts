@@ -58,7 +58,8 @@ def _write_events_shard(json_file: str, out_dir: str) -> str:
     shard_path = os.path.join(out_dir, f"{name}.parquet")
 
     con = _dd.connect()
-    # Keep worker-side parallelism available; rely on DuckDB default thread setting
+    # Constrain each worker to a single DuckDB thread to avoid per-worker thread blow-up
+    con.execute("PRAGMA threads=1;")
     con.execute("PRAGMA preserve_insertion_order=false;")
     # Materialize the transformed rows directly to Parquet
     dest = shard_path.replace("'", "''")
@@ -1102,7 +1103,8 @@ class App:
         if not chosen.is_dir():
             return [], None
 
-        files = sorted(chosen.glob('codex-query-*.jsonl'))
+        # Load both query and conditional oracle outputs
+        files = sorted(chosen.glob('codex-*.jsonl'))
         recs: List[dict] = []
         for fp in files:
             with fp.open('r') as f:
@@ -1119,6 +1121,11 @@ class App:
             r['verdict'] = self._compute_verdict(r)
             if 'tokens_used' not in r:
                 r['tokens_used'] = self._compute_tokens_used_from_stdout(r.get('stdout'))
+            # Subject normalization (query vs conditional)
+            # Some datasets use 'condition' for codex-conditional; tolerate both.
+            subj = r.get('query') or r.get('conditional') or r.get('condition') or ''
+            r['subject'] = subj
+            r['subject_preview'] = self._preview(subj)
         return recs, chosen
 
     # Shared renderer for Oracle record details (used in tab and fullscreen dialog)
@@ -1157,9 +1164,25 @@ class App:
                 ui.label(str(rec.get('exit_code', '—')))
 
     def _render_oracle_sql_section(self, rec: dict) -> None:
-        pretty = App.format_sql(rec.get('query', ''))
-        with ui.expansion('SQL', icon='data_object', value=True).classes('w-full'):
-            ui.code(pretty, language='sql').classes('m-0')
+        # Backward-compat alias if called elsewhere; choose section based on available fields.
+        self._render_oracle_subject_section(rec)
+
+    def _render_oracle_subject_section(self, rec: dict) -> None:
+        oracle_kind = str(rec.get('oracle') or '')
+        # Prefer explicit fields; support both 'conditional' and 'condition'
+        if oracle_kind == 'codex-conditional' or ('conditional' in rec or 'condition' in rec) and not rec.get('query'):
+            subject = rec.get('conditional') or rec.get('condition') or ''
+            with ui.expansion('Conditional', icon='rule', value=True).classes('w-full'):
+                # Plain text display
+                try:
+                    ui.code(subject, language='text').classes('m-0')
+                except Exception:
+                    ui.label(subject)
+        else:
+            # Default to SQL query presentation
+            pretty = App.format_sql(rec.get('query', ''))
+            with ui.expansion('SQL', icon='data_object', value=True).classes('w-full'):
+                ui.code(pretty, language='sql').classes('m-0')
 
     def _render_oracle_stacktrace_section(self, rec: dict) -> None:
         stack_text = '\n'.join(rec.get('stacktrace') or [])
@@ -1259,7 +1282,25 @@ class App:
             'tooltipShowDelay': 300,
             'columnDefs': [
                 {'headerName': '#', 'field': 'row_idx', 'width': 70, 'minWidth': 60, 'maxWidth': 90, 'pinned': 'left', 'sortable': False, 'resizable': False, 'suppressMenu': True, 'type': 'rightAligned', 'cellClass': 'text-right text-grey'},
-                {'headerName': 'Query', 'field': 'query', 'cellClass': 'font-mono truncate', 'flex': 2, 'minWidth': 320, 'tooltipField': 'query'},
+                {
+                    'headerName': 'Subject',
+                    'field': 'subject_preview',
+                    'tooltipField': 'subject',
+                    'flex': 2,
+                    'minWidth': 320,
+                    # Render a badge for kind + truncated subject text
+                    'cellRenderer': 'function(params){\n'
+                                     '  const k = (params.data && params.data.oracle) || "";\n'
+                                     '  const kind = k === "codex-conditional" ? "Conditional" : "Query";\n'
+                                     '  const color = kind === "Conditional" ? "bg-amber-600" : "bg-indigo-600";\n'
+                                     '  const esc = s => String(s || "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));\n'
+                                     '  const text = esc(params.value || "");\n'
+                                     '  return `<span class=\"inline-flex items-center gap-2 w-full\">` +\n'
+                                     '         `<span class=\"inline-block px-2 py-[2px] rounded text-white text-xs ${color}\">${kind}</span>` +\n'
+                                     '         `<span class=\"font-mono truncate flex-1 min-w-0\">${text}</span>` +\n'
+                                     '         `</span>`;\n'
+                                     '}'
+                },
                 {'headerName': 'Verdict', 'field': 'verdict', 'width': 110, 'minWidth': 100, 'cellClass': 'text-center font-medium', 'cellStyle': 'function(){ return {textAlign: "center"}; }', 'cellClassRules': {'text-positive': "data.verdict === 'Relevant'", 'text-negative': "data.verdict === 'Irrelevant'", 'text-warning': "data.verdict === 'Unsure'", 'text-gray-700': "data.verdict === 'Unknown'"}},
                 {'headerName': 'Duration (s)', 'field': 'dur_s', 'width': 110, 'minWidth': 100, 'type': 'numericColumn'},
                 {'headerName': 'Tokens', 'field': 'tokens_used', 'width': 140, 'minWidth': 120, 'type': 'numericColumn'},
