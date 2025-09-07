@@ -19,6 +19,7 @@ import sqlparse
 from nicegui import ui
 
 from .db import APDB
+from .metrics import render_metrics_tab
 from .index_builder import build_full_index, _list_input_files, INPUT_FILE_GLOB_PATTERNS
 
 
@@ -172,7 +173,9 @@ class App:
         self.main_tabs = None
         self.tab_runs = None
         self.tab_oracle = None
+        self.tab_metrics = None
         self.sidebar_runs = None
+        self.metrics_container = None
 
         self._build_ui()
         self._refresh_files_found()
@@ -328,6 +331,7 @@ class App:
             with ui.tabs() as self.main_tabs:
                 self.tab_runs = ui.tab('Runs')
                 self.tab_oracle = ui.tab('Oracle')
+                self.tab_metrics = ui.tab('Metrics')
 
     def _build_main_panels(self) -> None:
         # Main content with top-level tabs for Runs and Oracle
@@ -343,6 +347,11 @@ class App:
                         self.oracle_container = ui.column().classes('w-full flex-1 min-h-0')
                         with self.oracle_container:
                             self._render_oracle_outputs(parent=self.oracle_container)
+                    with ui.tab_panel(self.tab_metrics):
+                        # Metrics view
+                        self.metrics_container = ui.column().classes('w-full flex-1 min-h-0')
+                        with self.metrics_container:
+                            render_metrics_tab(self.run_dir)
 
     def _wire_tab_sidebar_visibility(self) -> None:
         # Initial state: Runs tab -> show sidebar
@@ -371,6 +380,7 @@ class App:
             self._drawer.update()
         except Exception:
             pass
+
 
     # --- Sidebar callbacks ---
     async def on_build_index_click(self):
