@@ -7,6 +7,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import List, Optional
+import re
 
 import duckdb
 
@@ -21,7 +22,7 @@ INPUT_FILE_GLOB_PATTERNS = [
 EVENT_SHARDS_DIRNAME = "event_shards"
 
 
-def _write_events_shard(json_file: str, out_dir: str) -> str:
+def _write_events_shard(json_file: str, out_dir: str, memory_limit: Optional[str] = None) -> str:
     """Worker: read one JSON(.gz|.zst) file, transform to event rows, and write a Parquet shard.
     Returns the output shard path.
     """
@@ -38,6 +39,9 @@ def _write_events_shard(json_file: str, out_dir: str) -> str:
         con.execute("PRAGMA threads=1;")
         con.execute("PRAGMA temp_directory=?", [tmpdir])
         con.execute("PRAGMA preserve_insertion_order=false;")
+        # Optionally cap each worker's memory budget
+        if memory_limit and str(memory_limit).strip().lower() != 'system':
+            con.execute("PRAGMA memory_limit=?", [str(memory_limit)])
         # Materialize the transformed rows directly to Parquet
         dest = shard_path.replace("'", "''")
         con.execute(
@@ -104,6 +108,63 @@ def _list_input_files(data_dir: Path | str) -> List[str]:
     return [str(p) for p in sorted(files, key=lambda x: x.name)]
 
 
+def _parse_memory_bytes(s: str) -> Optional[int]:
+    """Parse DuckDB-style memory strings like '8GB', '1024MB', return bytes.
+
+    Returns None for 'system' or empty values.
+    """
+    if s is None:
+        return None
+    t = str(s).strip().lower()
+    if t == '' or t == 'system':
+        return None
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*([kmgt]?b?)$", t)
+    if not m:
+        # Fallback: try to parse as integer bytes
+        try:
+            return int(float(t))
+        except Exception:
+            return None
+    val = float(m.group(1))
+    unit = m.group(2)
+    mult = 1
+    if unit in ('k', 'kb'):
+        mult = 1024
+    elif unit in ('m', 'mb'):
+        mult = 1024 ** 2
+    elif unit in ('g', 'gb'):
+        mult = 1024 ** 3
+    elif unit in ('t', 'tb'):
+        mult = 1024 ** 4
+    return int(val * mult)
+
+
+def _format_duckdb_mem(nbytes: int) -> str:
+    """Format a byte value for DuckDB PRAGMA memory_limit (prefer MB granularity)."""
+    # Use MB to avoid decimals and keep things explicit
+    mb = max(1, int(nbytes // (1024 ** 2)))
+    return f"{mb}MB"
+
+
+def _per_worker_memory(total: str, workers: int) -> Optional[str]:
+    """Compute per-worker memory cap string from a total budget.
+
+    If total is 'system' or unparsable, returns None (no cap). Ensures a
+    reasonable floor to avoid pathological low values.
+    """
+    if not total:
+        return None
+    b = _parse_memory_bytes(total)
+    if b is None:
+        return None
+    w = max(1, int(workers or 1))
+    per = b // w
+    # Apply a conservative floor (128MB) to keep DuckDB operational on tiny budgets
+    floor = 128 * 1024 * 1024
+    per = max(per, floor)
+    return _format_duckdb_mem(per)
+
+
 def build_full_index(
     data_dir: Path,
     index_path: Path,
@@ -128,8 +189,12 @@ def build_full_index(
 
         # Fan out per-file workers
         done = 0
+        per_worker_mem = _per_worker_memory(memory_limit, threads)
         with concurrent.futures.ProcessPoolExecutor(max_workers=threads) as pool:
-            futs = [pool.submit(_write_events_shard, f, str(sys_tmp_shards_dir)) for f in files]
+            futs = [
+                pool.submit(_write_events_shard, f, str(sys_tmp_shards_dir), per_worker_mem)
+                for f in files
+            ]
             for fut in concurrent.futures.as_completed(futs):
                 # Propagate errors early if any
                 shard_path = fut.result()

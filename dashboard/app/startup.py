@@ -47,6 +47,9 @@ class AppState:
     min_conds: int = 0
     duckdb: DuckDBConfig = field(default_factory=DuckDBConfig)
     run_id: Optional[int] = None
+    # Event timeline filters
+    show_cond_atoms: bool = True
+    show_query_events: bool = True
 
 
 # ------------------ Formatting helpers ------------------
@@ -217,18 +220,34 @@ class App:
 
     # --- UI sub-builders ---
     def _inject_global_css(self) -> None:
-        css = (
-            '.cm-editor{width:100%}'
-            '.cm-scroller{overflow:auto}'
-            '.cm-content{min-width:0!important}'
-            '.prompt-cm .cm-editor{min-height:18rem}'
-            '.stacktrace-cm .cm-editor{min-height:18rem}'
-            '.stacktrace-dialog .cm-editor{height:100%}'
-            '#oracle-grid{width:100%!important;max-width:none!important}'
-            '#oracle-grid .ag-root-wrapper{width:100%!important}'
-            '.q-page, .q-page-container{max-width:none!important}'
-            'body, .q-app, .q-page-container, .q-page{height:100vh;display:flex;flex-direction:column}'
-        )
+        css = """
+            .cm-editor{width:100%}
+            .cm-scroller{overflow:auto}
+            .cm-content{min-width:0!important}
+            .prompt-cm .cm-editor{min-height:18rem}
+            .stacktrace-cm .cm-editor{min-height:18rem}
+            .stacktrace-dialog .cm-editor{height:100%}
+
+            /* Keep Quasar pages full-width */
+            .q-page, .q-page-container{max-width:none!important}
+
+            /* Layout: let QLayout own the viewport; make containers flex & shrinkable */
+            html, body, .q-app { height: 100% }
+            .q-layout { min-height: 100vh; display:flex; flex-direction:column }
+            .q-page-container{flex:1 1 auto;display:flex;flex-direction:column;min-height:0}
+            .q-page{flex:1 1 auto;display:flex;flex-direction:column;min-height:0}
+
+            /* Tabs must stretch to fill remaining height */
+            .q-tab-panels{flex:1 1 auto;min-height:0}
+            .q-tab-panels .q-tab-panel{display:flex;flex-direction:column;min-height:0;height:100%}
+
+            /* AG Grid should fill its container and scroll internally */
+            .oracle-grid{width:100%!important;max-width:none!important;height:100%!important;min-height:0;overflow:hidden}
+            .oracle-grid .ag-root-wrapper,
+            .oracle-grid .ag-root-wrapper-body{width:100%!important;height:100%!important;overflow:hidden}
+            .oracle-grid .ag-center-cols-viewport{overflow:auto!important}
+            .oracle-grid .ag-body-viewport{overflow:auto!important}
+        """
         ui.add_css(css)
 
     def _build_drawer_and_sidebar(self) -> None:
@@ -259,6 +278,12 @@ class App:
         self.run_id_input = ui.number('Run ID', value=0, precision=0).props('dense')
         # NiceGUI's generic change event doesn't provide e.value; read from the component instead
         self.run_id_input.on('change', lambda e: self._on_run_change(self.run_id_input.value))
+
+        # Event-type filters for the timeline
+        self.show_query_checkbox = ui.switch('Show queries', value=self.state.show_query_events)
+        self.show_query_checkbox.on_value_change(lambda e: self._on_filter_change(show_query_events=bool(getattr(e, 'value', self.show_query_checkbox.value))))
+        self.show_cond_checkbox = ui.switch('Show conditionals', value=self.state.show_cond_atoms)
+        self.show_cond_checkbox.on_value_change(lambda e: self._on_filter_change(show_cond_atoms=bool(getattr(e, 'value', self.show_cond_checkbox.value))))
 
         ui.separator()
         sql_input = ui.input('SQL contains', value=self.state.sql_sub)
@@ -306,16 +331,16 @@ class App:
 
     def _build_main_panels(self) -> None:
         # Main content with top-level tabs for Runs and Oracle
-        with ui.row().classes('px-4 py-2 gap-4 w-full max-w-none items-stretch flex-1').style('width: 100%'):
-            with ui.column().classes('w-full gap-3 max-w-none flex-1'):
+        with ui.row().classes('px-4 py-2 gap-4 w-full max-w-none items-stretch flex-1 min-h-0').style('width: 100%'):
+            with ui.column().classes('w-full gap-3 max-w-none flex-1 min-h-0'):
                 # Panels are driven by the tabs in the header
-                with ui.tab_panels(self.main_tabs, value=self.tab_runs).classes('w-full flex-1'):
+                with ui.tab_panels(self.main_tabs, value=self.tab_runs).classes('w-full flex-1 min-h-0'):
                     with ui.tab_panel(self.tab_runs):
                         # Timeline container for run details
-                        self.timeline_container = ui.column().classes('gap-2 w-full flex-1')
+                        self.timeline_container = ui.column().classes('gap-2 w-full flex-1 min-h-0')
                     with ui.tab_panel(self.tab_oracle):
                         # Global Oracle view (independent of runs/index)
-                        self.oracle_container = ui.column().classes('w-full flex-1')
+                        self.oracle_container = ui.column().classes('w-full flex-1 min-h-0')
                         with self.oracle_container:
                             self._render_oracle_outputs(parent=self.oracle_container)
 
@@ -458,13 +483,36 @@ class App:
                 return None
 
     def _on_filter_change(self, **kwargs) -> None:
+        """Handle filter changes from the sidebar.
+
+        - SQL/min_* filters affect the Traces table and should reload it.
+        - Timeline filters (show_* checkboxes) should only re-render the current run's events.
+        """
+        traces_filters_changed = False
+        timeline_filters_changed = False
+
         if 'sql' in kwargs:
             self.state.sql_sub = kwargs['sql']
+            traces_filters_changed = True
         if 'min_sql' in kwargs:
             self.state.min_sql = kwargs['min_sql']
+            traces_filters_changed = True
         if 'min_conds' in kwargs:
             self.state.min_conds = kwargs['min_conds']
-        self.refresh_traces()
+            traces_filters_changed = True
+        if 'show_cond_atoms' in kwargs:
+            self.state.show_cond_atoms = bool(kwargs['show_cond_atoms'])
+            timeline_filters_changed = True
+        if 'show_query_events' in kwargs:
+            self.state.show_query_events = bool(kwargs['show_query_events'])
+            timeline_filters_changed = True
+
+        if traces_filters_changed:
+            # Reload traces list and re-render run detail
+            self.refresh_traces()
+        elif timeline_filters_changed:
+            # Only re-render the current run's events timeline
+            self._render_run_detail()
 
     def _on_duckdb_change(self, **kwargs) -> None:
         for k, v in kwargs.items():
@@ -728,12 +776,29 @@ class App:
                 'PathConditionAtom': self._ev_path_cond,
             }
 
+            # Apply optional type filtering based on sidebar checkboxes
+            allowed_types = None
+            if not (self.state.show_cond_atoms and self.state.show_query_events):
+                allowed_types = set()
+                if self.state.show_query_events:
+                    allowed_types.update({'SqlQueryDecl', 'SqlQueryResRowDecl', 'SqlQueryResEnd'})
+                if self.state.show_cond_atoms:
+                    allowed_types.add('PathConditionAtom')
+
+            shown = 0
             for _, r in ev_df.iterrows():
                 elem = r['elem']
-                fn = handlers.get(elem['$type'])
+                et = elem['$type']
+                if allowed_types is not None and et not in allowed_types:
+                    continue
+                fn = handlers.get(et)
                 if fn is None:
                     raise ValueError(f"Unknown event type: {r['type']}")
                 fn(r, elem, ctx)
+                shown += 1
+
+            if shown == 0:
+                ui.label('(no events match filters)').classes('text-grey')
 
     @dataclass
     class QueryContext:
@@ -828,10 +893,36 @@ class App:
     def _ev_path_cond(self, r, elem, ctx: 'App.QueryContext') -> None:
         if ctx.current_query_card is not None:
             raise ValueError("PathConditionAtom inside SqlQueryDecl")
+        # Try to find an oracle record (conditional) for this atom via oracle_digest
+        try:
+            od = r.get('oracle_digest') if isinstance(r, dict) else r['oracle_digest']
+        except Exception:
+            od = None
+        rec = ctx.oracle_by_digest.get(od) if od else None
+
         with ui.card().classes('w-full'):
             with ui.row().classes('items-start gap-2 w-full'):
                 ui.label(f"[{int(r['event_idx'])}]").classes('text-caption text-grey')
-                _vac_badge(r['vacuousness'])
+                is_irrel = bool(rec is not None and rec.get('verdict') == Verdict.IRRELEVANT)
+                if not is_irrel:
+                    _vac_badge(r['vacuousness'])
+                # If we have an oracle record for this condition, show a verdict badge with details dialog
+                if rec is not None:
+                    badge = self._verdict_badge(rec.get('verdict')).classes('cursor-pointer')
+                    with ui.dialog() as dlg:
+                        dlg.props('maximized no-refocus')
+                        with ui.card().classes('w-screen h-screen max-w-none max-h-none p-2 flex flex-col gap-2 overflow-hidden'):
+                            with ui.row().classes('items-center justify-between w-full'):
+                                ui.label('Oracle Details for Condition').classes('text-subtitle1')
+                                ui.button(icon='close', on_click=dlg.close).props('flat round dense')
+                            with ui.element('div').classes('flex-1 min-h-0 w-full overflow-auto'):
+                                self._render_oracle_record_details_content(rec)
+                            with ui.row().classes('justify-end w-full'):
+                                ui.button('Close', on_click=dlg.close).props('flat')
+                    try:
+                        badge.on('click', dlg.open)
+                    except Exception:
+                        pass
                 frags = term_to_frags(elem["cond"])
                 if elem['outcome'] is False:
                     frags = [{'kind': 'text', 'text': '!'}] + frags
@@ -942,6 +1033,7 @@ class App:
                 self._render_oracle_sql_section(rec)
                 self._render_oracle_stacktrace_section(rec)
                 self._render_oracle_report_section(rec)
+                self._render_oracle_prompt_section(rec)
                 self._render_oracle_stdio_section(rec)
 
     def _render_oracle_meta(self, rec: dict) -> None:
@@ -1015,6 +1107,36 @@ class App:
             with ui.expansion('stderr', icon='terminal').classes('w-full'):
                 self.render_terminal(stderr)
 
+    def _render_oracle_prompt_section(self, rec: dict) -> None:
+        """Render the raw prompt used for this oracle record, if present."""
+        if not (prompt := rec.get('prompt')):
+            return
+        with ui.expansion('Prompt', icon='code', value=True).classes('w-full'):
+            try:
+                ui.codemirror(value=str(prompt), line_wrapping=True).classes('w-full prompt-cm')
+            except Exception:
+                # Fallback to plain text if CodeMirror is unavailable
+                self.render_terminal(str(prompt))
+
+    @staticmethod
+    def _is_conditional_record(rec: dict) -> bool:
+        """Heuristic: identify conditional-oracle records.
+        Considers explicit oracle kind and presence of 'conditional'/'condition' when no 'query' field.
+        """
+        try:
+            oracle_kind = str(rec.get('oracle') or '')
+        except Exception:
+            oracle_kind = ''
+        if oracle_kind == 'codex-conditional':
+            return True
+        # Treat as conditional if it carries a conditional text and lacks a query
+        return (('conditional' in rec or 'condition' in rec) and not rec.get('query'))
+
+    @staticmethod
+    def _is_query_record(rec: dict) -> bool:
+        """Records that are not conditionals are considered query-oriented."""
+        return not App._is_conditional_record(rec)
+
     def _render_oracle_outputs(self, *, parent=None) -> None:
         """Render the oracle outputs tab contents inside the given parent or current context."""
         container = parent or self.timeline_container
@@ -1027,11 +1149,37 @@ class App:
                 ui.label(msg).classes('text-caption text-grey')
                 return
 
-            self._oracle_summary_chart(records)
-            ui.separator()
-            grid, by_digest = self._oracle_grid(records)
-            rec_dlg, rec_dlg_container = self._oracle_record_dialog()
-            grid.on('rowDoubleClicked', lambda e: self._on_oracle_row_double_clicked(e, by_digest, rec_dlg, rec_dlg_container), args=['data'])
+            # Split view: a tab for Queries and one for Conditionals.
+            self._oracle_tabs(records)
+
+    def _oracle_tabs(self, records: List[dict]) -> None:
+        queries = [r for r in records if self._is_query_record(r)]
+        conds = [r for r in records if self._is_conditional_record(r)]
+
+        with ui.tabs() as tabs:
+            t_q = ui.tab('Queries')
+            t_c = ui.tab('Conditionals')
+
+        with ui.tab_panels(tabs, value=t_q).classes('w-full flex-1 min-h-0'):
+            with ui.tab_panel(t_q):
+                # Chart
+                self._oracle_summary_chart(queries)
+                ui.separator()
+                # Grid
+                with ui.element('div').classes('w-full flex-1 min-h-0'):
+                    grid_q, by_q = self._oracle_grid(queries, dom_id='oracle-grid-queries', subject_label='Query')
+            with ui.tab_panel(t_c):
+                # Chart
+                self._oracle_summary_chart(conds)
+                ui.separator()
+                # Grid
+                with ui.element('div').classes('w-full flex-1 min-h-0'):
+                    grid_c, by_c = self._oracle_grid(conds, dom_id='oracle-grid-conditionals', subject_label='Condition')
+
+        # Shared record details dialog; hook both grids
+        rec_dlg, rec_dlg_container = self._oracle_record_dialog()
+        grid_q.on('rowDoubleClicked', lambda e: self._on_oracle_row_double_clicked(e, by_q, rec_dlg, rec_dlg_container), args=['data'])
+        grid_c.on('rowDoubleClicked', lambda e: self._on_oracle_row_double_clicked(e, by_c, rec_dlg, rec_dlg_container), args=['data'])
 
     def _oracle_summary_chart(self, records: List[dict]) -> None:
         counts = Counter(r['verdict'] for r in records)
@@ -1077,7 +1225,22 @@ class App:
             'series': stacked_series,
         }).classes('w-full max-w-[560px] mx-auto').style('height: 64px')
 
-    def _oracle_grid(self, records: List[dict]):
+    def _oracle_summary_charts_split(self, records: List[dict]) -> None:
+        """Render two compact stacked bar charts: Queries vs Conditionals.
+        Falls back gracefully if one category is empty.
+        """
+        queries = [r for r in records if self._is_query_record(r)]
+        conds = [r for r in records if self._is_conditional_record(r)]
+
+        with ui.row().classes('items-start gap-6 flex-wrap w-full'):
+            with ui.column().classes('gap-1 min-w-[280px] flex-1'):
+                ui.label('Queries').classes('text-caption text-grey')
+                self._oracle_summary_chart(queries)
+            with ui.column().classes('gap-1 min-w-[280px] flex-1'):
+                ui.label('Conditionals').classes('text-caption text-grey')
+                self._oracle_summary_chart(conds)
+
+    def _oracle_grid(self, records: List[dict], *, dom_id: Optional[str] = None, subject_label: str = 'Subject'):
         grid = ui.aggrid({
             'defaultColDef': {'resizable': True, 'sortable': True},
             'animateRows': True,
@@ -1085,36 +1248,48 @@ class App:
             'suppressCellFocus': True,
             'suppressMovableColumns': True,
             'tooltipShowDelay': 300,
+            'rowModelType': 'clientSide',
+            'suppressHorizontalScroll': False,
+            'alwaysShowHorizontalScroll': False,
+            'alwaysShowVerticalScroll': False,
             'columnDefs': [
                 {'headerName': '#', 'field': 'row_idx', 'width': 70, 'minWidth': 60, 'maxWidth': 90, 'pinned': 'left', 'sortable': False, 'resizable': False, 'suppressMenu': True, 'type': 'rightAligned', 'cellClass': 'text-right text-grey'},
                 {
-                    'headerName': 'Subject',
-                    'field': 'subject_preview',
+                    'headerName': subject_label,
+                    'field': 'subject',
+                    'filter': True,
                     'tooltipField': 'subject',
                     'flex': 2,
                     'minWidth': 320,
-                    # Render a badge for kind + truncated subject text
-                    'cellRenderer': 'function(params){\n'
-                                     '  const k = (params.data && params.data.oracle) || "";\n'
-                                     '  const kind = k === "codex-conditional" ? "Conditional" : "Query";\n'
-                                     '  const color = kind === "Conditional" ? "bg-amber-600" : "bg-indigo-600";\n'
-                                     '  const esc = s => String(s || "").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));\n'
-                                     '  const text = esc(params.value || "");\n'
-                                     '  return `<span class=\"inline-flex items-center gap-2 w-full\">` +\n'
-                                     '         `<span class=\"inline-block px-2 py-[2px] rounded text-white text-xs ${color}\">${kind}</span>` +\n'
-                                     '         `<span class=\"font-mono truncate flex-1 min-w-0\">${text}</span>` +\n'
-                                     '         `</span>`;\n'
-                                     '}'
+                    'cellStyle': { 'fontFamily': 'monospace' },
                 },
-                {'headerName': 'Verdict', 'field': 'verdict', 'width': 110, 'minWidth': 100, 'cellClass': 'text-center font-medium', 'cellStyle': 'function(){ return {textAlign: "center"}; }', 'cellClassRules': {'text-positive': "data.verdict === 'Relevant'", 'text-negative': "data.verdict === 'Irrelevant'", 'text-warning': "data.verdict === 'Unsure'", 'text-gray-700': "data.verdict === 'Unknown'"}},
-                {'headerName': 'Duration (s)', 'field': 'dur_s', 'width': 110, 'minWidth': 100, 'type': 'numericColumn'},
+                {
+                    'headerName': 'Verdict',
+                    'field': 'verdict',
+                    'width': 110, 'minWidth': 100,
+                    'cellClassRules': {
+                        'text-positive': "data.verdict === 'Relevant'",
+                        'text-negative': "data.verdict === 'Irrelevant'",
+                        'text-warning': "data.verdict === 'Unsure'",
+                        'text-gray-700': "data.verdict === 'Unknown'"
+                    }
+                },
+                {
+                    'headerName': 'Duration (s)',
+                    'field': 'dur_s',
+                    'width': 110, 'minWidth': 100,
+                    'type': 'numericColumn',
+                    'valueFormatter': 'value != null ? value.toFixed(2) : ""',
+                },
                 {'headerName': 'Tokens', 'field': 'tokens_used', 'width': 140, 'minWidth': 120, 'type': 'numericColumn'},
                 {'headerName': 'Exit', 'field': 'exit_code', 'width': 80, 'minWidth': 70, 'type': 'numericColumn'},
             ],
             'rowData': records,
             'rowSelection': 'single',
-            'domLayout': 'autoHeight',
-        }).classes('w-full max-w-none flex-1')
+        })
+        if dom_id:
+            grid.props(f'id={dom_id}')
+        grid.classes('oracle-grid w-full h-full max-w-none').style('height: 100%')
         by_digest: Dict[str, dict] = {r['key_digest']: r for r in records}
         return grid, by_digest
 
