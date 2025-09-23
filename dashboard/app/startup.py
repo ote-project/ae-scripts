@@ -970,8 +970,12 @@ class App:
     def _compute_tokens_used_from_stdout(stdout: Optional[str]) -> Optional[int]:
         if not stdout:
             return None
-        m = re.findall(r"tokens used: (\d+)", stdout)
-        return int(m[-1]) if m else None
+        # Accept numbers with optional thousands separators, flexible spacing/case.
+        m = re.findall(r"tokens\s*used\s*:\s*([\d,]+)", stdout, flags=re.IGNORECASE)
+        if not m:
+            return None
+        # Remove commas before converting to int
+        return int(m[-1].replace(',', ''))
 
     @staticmethod
     def _compute_verdict(rec: dict) -> Verdict:
