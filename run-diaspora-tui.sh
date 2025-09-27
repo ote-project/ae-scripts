@@ -2,6 +2,32 @@
 set -euo pipefail
 
 ###############################################################################
+# ──  CLI options  ─────────────────────────────────────────────────────────────
+###############################################################################
+do_pull=true
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --no-pull)
+            do_pull=false
+            shift
+            ;;
+        --help|-h)
+            cat <<'USAGE'
+Usage: run-diaspora-tui.sh [--no-pull]
+
+Options:
+  --no-pull   Skip the git pull steps before running experiments.
+USAGE
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+###############################################################################
 # ──  Interactive front-end  ──────────────────────────────────────────────────
 ###############################################################################
 command -v gum >/dev/null ||
@@ -40,10 +66,14 @@ extra_opts=$(gum input --prompt "Extra options for ExploreExecutions (blank = no
 # ──  Run experiments  ────────────────────────────────────────────────────────
 ###############################################################################
 cd "$HOME/dse"
-(cd examples; git pull --ff-only)
+if [[ "$do_pull" == true ]]; then
+    (cd examples; git pull --ff-only)
+fi
 
 cd "concolic_driver"
-git pull --ff-only
+if [[ "$do_pull" == true ]]; then
+    git pull --ff-only
+fi
 for exp in "${experiments[@]}"; do
     conf="$HOME/dse/examples/${exp}.conf"
     log="$HOME/dse/logs/${exp//_/-}-2r-${suffix}"
