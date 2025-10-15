@@ -56,6 +56,7 @@ def rewrite(cond: dict, to_query: str, to_params_indices: tuple[int, ...]) -> di
         "params": [
             elem["params"][i] for i in to_params_indices
         ],
+        "stacktrace": elem["stacktrace"]
     }
 
     return {

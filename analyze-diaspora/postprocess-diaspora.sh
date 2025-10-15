@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 set -ex
 
+# Default memory for sbt (in MB)
+MEM_MB=131072
+
+# Parse options: allow optional -m <MB>
+while getopts ":m:" opt; do
+  case $opt in
+    m)
+      MEM_MB="$OPTARG"
+      ;;
+    \?)
+      echo "Usage: $(basename "$0") [-m MEM_MB] suffix" >&2
+      exit 1
+      ;;
+  esac
+done
+
+shift $((OPTIND-1))
+
 suffix=${1?param missing - suffix.}
 
 cd "$HOME/dse"
@@ -12,7 +30,7 @@ for p in $HOME/dse/logs/diaspora-*$suffix; do
 
     paths_dir="$(realpath "$p/annotated-paths")"
     rm -f $paths_dir/original-conditioned-queries.json
-    (cd $HOME/dse/concolic_driver; sbt -mem 131072 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.GenerateConditionedQueries $config_file $paths_dir")
+    (cd $HOME/dse/concolic_driver; sbt -mem "$MEM_MB" "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.GenerateConditionedQueries $config_file $paths_dir")
 
     (cd $paths_dir;
         if [ ! -f original-conditioned-queries.json ]; then
@@ -25,7 +43,7 @@ for p in $HOME/dse/logs/diaspora-*$suffix; do
             $HOME/dse/scripts/analyze-diaspora/rewrite-left-outer-joins.sh > conditioned-queries.json
     )
 
-    (cd $HOME/dse/concolic_driver; sbt -mem 102400 "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ConvertToSqlViews $config_file $paths_dir")
+    (cd $HOME/dse/concolic_driver; sbt -mem "$MEM_MB" "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ConvertToSqlViews $config_file $paths_dir")
 
     END=$(date +%s.%N)
     DIFF=$(echo "$END - $START" | bc)
