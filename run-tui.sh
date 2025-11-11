@@ -13,7 +13,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat <<'USAGE'
-Usage: run-diaspora-tui.sh [--no-pull]
+Usage: run-tui.sh [--no-pull]
 
 Options:
   --no-pull   Skip the git pull steps before running experiments.
@@ -37,7 +37,7 @@ suffix=$(gum input --value "$(date +%Y%m%d-%H%M%S)" \
                    --prompt "Suffix for log-files ➜ ")
 [[ -z "$suffix" ]] && { echo "❌  Suffix cannot be empty."; exit 1; }
 
-all_experiments=(
+diaspora_experiments=(
   "diaspora_comments_index"
   "diaspora_conversations_index"
   "diaspora_notifications_index"
@@ -45,14 +45,45 @@ all_experiments=(
   "diaspora_posts_show"
   "diaspora_people_stream"
 )
-selected=$(printf '%s\n' "${all_experiments[@]}" |
-           gum choose --no-limit --header "Select experiments to run" --selected "*")
 
-if [[ -z "$selected" ]]; then
-  echo "Nothing selected – aborting."; exit 0;
+autolab_experiments=(
+  "autolab_courses_index"
+  "autolab_assessments_index"
+  "autolab_assessments_viewGradesheet"
+  "autolab_submissions_download"
+  "autolab_metrics_get_num_pending_instances"
+)
+
+apps_selected=$(printf '%s\n' diaspora autolab |
+                gum choose --no-limit --header "Select applications to run")
+
+if [[ -z "$apps_selected" ]]; then
+  echo "No applications selected – aborting."; exit 0;
 fi
 
-IFS=$'\n' readarray -t experiments <<<"$selected"
+IFS=$'\n' readarray -t apps <<<"$apps_selected"
+experiments=()
+for app in "${apps[@]}"; do
+  app_var="${app}_experiments"
+  if ! declare -p "$app_var" >/dev/null 2>&1; then
+    echo "❌  Unknown application '$app'." >&2
+    exit 1
+  fi
+
+  declare -n app_array="$app_var"
+  selection=$(printf '%s\n' "${app_array[@]}" |
+              gum choose --no-limit \
+                         --header "Select ${app^} experiments (Esc = skip)" \
+                         --selected "*")
+
+  [[ -z "$selection" ]] && continue
+  IFS=$'\n' readarray -t chosen <<<"$selection"
+  experiments+=("${chosen[@]}")
+done
+
+if [[ "${#experiments[@]}" -eq 0 ]]; then
+  echo "Nothing selected – aborting."; exit 0;
+fi
 
 memory=$(gum input --value "20480" \
                    --prompt "Maximum heap (MB) ➜ ")
