@@ -1348,11 +1348,5 @@ def validate_run_dir(s: str) -> Path:
         raise argparse.ArgumentTypeError(f"run directory not found: {p}")
     if not (paths_dir := (p / 'annotated-paths')).is_dir():
         raise argparse.ArgumentTypeError(f"run directory does not contain 'annotated-paths' subdirectory: {p}")
-    try:
-        files = _list_input_files(paths_dir)
-    except ValueError as e:
-        raise argparse.ArgumentTypeError(str(e))
-    if not files:
-        pats = ', '.join(INPUT_FILE_GLOB_PATTERNS)
-        raise argparse.ArgumentTypeError(f"no input files matching any of [{pats}] found in '{paths_dir}'")
+    # Allow zero files - the UI will handle this gracefully by showing no data
     return p.expanduser()
