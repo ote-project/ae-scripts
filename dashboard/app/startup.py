@@ -160,6 +160,8 @@ class App:
         self.run_dir = run_dir
         self.data_dir = run_dir / 'annotated-paths'
         self.index_path = self.data_dir / 'ap_index.duckdb'
+        self.review_state_path = self.run_dir / 'oracle-reviewed.json'
+        self.review_state = self._load_review_state()
 
         self.state = AppState()
 
@@ -967,11 +969,12 @@ class App:
         return t if len(t) <= length else t[: length - 1] + '…'
 
     @staticmethod
-    def _compute_tokens_used_from_stdout(stdout: Optional[str]) -> Optional[int]:
-        if not stdout:
+    def _compute_tokens_used_from_output(output: Optional[str]) -> Optional[int]:
+        if not output:
             return None
         # Accept numbers with optional thousands separators, flexible spacing/case.
-        m = re.findall(r"tokens\s*used\s*:\s*([\d,]+)", stdout, flags=re.IGNORECASE)
+        # Handle both "tokens used: 123" and "tokens used\n123" formats
+        m = re.findall(r"tokens\s*used\s*:?\s*([\d,]+)", output, flags=re.IGNORECASE)
         if not m:
             return None
         # Remove commas before converting to int
@@ -1008,6 +1011,41 @@ class App:
                 color, text_color = 'grey', 'black'
         return ui.badge(verdict.value, color=color).props(f'text-color={text_color}')
 
+    def _load_review_state(self) -> Dict[str, bool]:
+        """Load persisted oracle review state keyed by key digest."""
+        path = getattr(self, 'review_state_path', None)
+        if path is None:
+            return {}
+        try:
+            with path.open('r') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return {}
+        except Exception:
+            return {}
+        if isinstance(data, dict):
+            return {str(k): bool(v) for k, v in data.items()}
+        return {}
+
+    def _save_review_state(self) -> None:
+        """Persist the in-memory review state."""
+        try:
+            self.review_state_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.review_state_path.open('w') as f:
+                json.dump(self.review_state, f, indent=2, sort_keys=True)
+        except Exception:
+            pass
+
+    def _update_review_state(self, key_digest: Optional[str], reviewed: bool) -> None:
+        """Update state for a specific key and flush to disk."""
+        if not key_digest:
+            return
+        if reviewed:
+            self.review_state[key_digest] = True
+        else:
+            self.review_state.pop(key_digest, None)
+        self._save_review_state()
+
     def _load_oracle_records(self) -> tuple[List[dict], Optional[Path]]:
         chosen = self.run_dir / 'oracle-logs'
         if not chosen.is_dir():
@@ -1030,12 +1068,17 @@ class App:
             r['row_idx'] = i
             r['verdict'] = self._compute_verdict(r)
             if 'tokens_used' not in r:
-                r['tokens_used'] = self._compute_tokens_used_from_stdout(r.get('stdout'))
+                # Try stdout first, then stderr
+                r['tokens_used'] = (
+                    self._compute_tokens_used_from_output(r.get('stdout')) or
+                    self._compute_tokens_used_from_output(r.get('stderr'))
+                )
             # Subject normalization (query vs conditional)
             # Some datasets use 'condition' for codex-conditional; tolerate both.
             subj = r.get('query') or r.get('conditional') or r.get('condition') or ''
             r['subject'] = subj
             r['subject_preview'] = self._preview(subj)
+            r['reviewed'] = bool(self.review_state.get(str(r.get('key_digest')), False))
         return recs, chosen
 
     # Shared renderer for Oracle record details (used in tab and fullscreen dialog)
@@ -1182,6 +1225,7 @@ class App:
                 # Grid
                 with ui.element('div').classes('w-full flex-1 min-h-0'):
                     grid_q, by_q = self._oracle_grid(queries, dom_id='oracle-grid-queries', subject_label='Query')
+                    self._attach_reviewed_listener(grid_q, by_q)
             with ui.tab_panel(t_c):
                 # Chart
                 self._oracle_summary_chart(conds)
@@ -1189,6 +1233,7 @@ class App:
                 # Grid
                 with ui.element('div').classes('w-full flex-1 min-h-0'):
                     grid_c, by_c = self._oracle_grid(conds, dom_id='oracle-grid-conditionals', subject_label='Condition')
+                    self._attach_reviewed_listener(grid_c, by_c)
 
         # Shared record details dialog; hook both grids
         rec_dlg, rec_dlg_container = self._oracle_record_dialog()
@@ -1269,6 +1314,21 @@ class App:
             'columnDefs': [
                 {'headerName': '#', 'field': 'row_idx', 'width': 70, 'minWidth': 60, 'maxWidth': 90, 'pinned': 'left', 'sortable': False, 'resizable': False, 'suppressMenu': True, 'type': 'rightAligned', 'cellClass': 'text-right text-grey'},
                 {
+                    'headerName': 'Reviewed',
+                    'field': 'reviewed',
+                    'width': 120,
+                    'minWidth': 110,
+                    'maxWidth': 140,
+                    'cellRenderer': 'agCheckboxCellRenderer',
+                    'cellEditor': 'agCheckboxCellEditor',
+                    'editable': True,
+                    'pinned': 'left',
+                    'sortable': False,
+                    'resizable': False,
+                    'suppressMenu': True,
+                    'cellClass': 'text-center',
+                },
+                {
                     'headerName': subject_label,
                     'field': 'subject',
                     'filter': True,
@@ -1306,6 +1366,44 @@ class App:
         grid.classes('oracle-grid w-full h-full max-w-none').style('height: 100%')
         by_digest: Dict[str, dict] = {r['key_digest']: r for r in records}
         return grid, by_digest
+
+    def _attach_reviewed_listener(self, grid, by_digest: Dict[str, dict]) -> None:
+        """Attach a cell-change listener to persist the Reviewed checkbox state."""
+        try:
+            grid.on('cellValueChanged', lambda e: self._on_oracle_reviewed_changed(e, by_digest))
+        except Exception:
+            pass
+
+    def _on_oracle_reviewed_changed(self, event, by_digest: Dict[str, dict]) -> None:
+        args = getattr(event, 'args', None)
+        if not isinstance(args, dict):
+            return
+        # Ensure we only react to the Reviewed column edits
+        col = args.get('colId') or args.get('field')
+        if col != 'reviewed':
+            return
+        data = args.get('data')
+        if not isinstance(data, dict):
+            return
+        kd = data.get('key_digest')
+        if not kd:
+            return
+
+        new_value = args.get('newValue')
+        reviewed = self._coerce_to_bool(new_value)
+        if kd in by_digest:
+            by_digest[kd]['reviewed'] = reviewed
+        self._update_review_state(kd, reviewed)
+
+    @staticmethod
+    def _coerce_to_bool(value) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {'1', 'true', 'yes', 'on'}
+        if isinstance(value, (int, float)):
+            return value != 0
+        return bool(value)
 
     def _oracle_record_dialog(self):
         with ui.dialog() as rec_dlg:
