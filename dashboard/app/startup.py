@@ -252,6 +252,11 @@ class App:
             .oracle-grid .ag-root-wrapper-body{width:100%!important;height:100%!important;overflow:hidden}
             .oracle-grid .ag-center-cols-viewport{overflow:auto!important}
             .oracle-grid .ag-body-viewport{overflow:auto!important}
+            .oracle-grid .oracle-row-reviewed .ag-cell,
+            .oracle-grid .oracle-row-reviewed .ag-group-contracted,
+            .oracle-grid .oracle-row-reviewed .ag-group-expanded{
+                background-color:#f0faf4;
+            }
         """
         ui.add_css(css)
 
@@ -1011,7 +1016,7 @@ class App:
                 color, text_color = 'grey', 'black'
         return ui.badge(verdict.value, color=color).props(f'text-color={text_color}')
 
-    def _load_review_state(self) -> Dict[str, bool]:
+    def _load_review_state(self) -> Dict[str, dict]:
         """Load persisted oracle review state keyed by key digest."""
         path = getattr(self, 'review_state_path', None)
         if path is None:
@@ -1023,9 +1028,23 @@ class App:
             return {}
         except Exception:
             return {}
-        if isinstance(data, dict):
-            return {str(k): bool(v) for k, v in data.items()}
-        return {}
+        if not isinstance(data, dict):
+            return {}
+        normalized: Dict[str, dict] = {}
+        for k, v in data.items():
+            normalized[str(k)] = self._normalize_review_entry(v)
+        return normalized
+
+    @staticmethod
+    def _normalize_review_entry(value) -> Dict[str, object]:
+        reviewed = False
+        notes = ''
+        if isinstance(value, dict):
+            reviewed = bool(value.get('reviewed', False))
+            notes = str(value.get('notes') or '')
+        else:
+            reviewed = bool(value)
+        return {'reviewed': reviewed, 'notes': notes}
 
     def _save_review_state(self) -> None:
         """Persist the in-memory review state."""
@@ -1036,15 +1055,44 @@ class App:
         except Exception:
             pass
 
+    def _persist_review_entry(self, key_digest: str, entry: Dict[str, object]) -> None:
+        """Persist a single review/notes entry; drop it if empty."""
+        reviewed = bool(entry.get('reviewed', False))
+        notes = str(entry.get('notes') or '')
+        if not reviewed and not notes.strip():
+            self.review_state.pop(key_digest, None)
+        else:
+            self.review_state[key_digest] = {'reviewed': reviewed, 'notes': notes}
+        self._save_review_state()
+
+    def _get_review_entry(self, key_digest: Optional[str]) -> Dict[str, object]:
+        if not key_digest:
+            return {'reviewed': False, 'notes': ''}
+        entry = self.review_state.get(str(key_digest))
+        if entry is None:
+            return {'reviewed': False, 'notes': ''}
+        return {'reviewed': bool(entry.get('reviewed', False)), 'notes': str(entry.get('notes') or '')}
+
     def _update_review_state(self, key_digest: Optional[str], reviewed: bool) -> None:
         """Update state for a specific key and flush to disk."""
         if not key_digest:
             return
-        if reviewed:
-            self.review_state[key_digest] = True
-        else:
-            self.review_state.pop(key_digest, None)
-        self._save_review_state()
+        entry = self._get_review_entry(key_digest)
+        entry['reviewed'] = bool(reviewed)
+        self._persist_review_entry(key_digest, entry)
+
+    def _set_note_for_digest(self, key_digest: Optional[str], note: str) -> None:
+        if not key_digest:
+            return
+        entry = self._get_review_entry(key_digest)
+        entry['notes'] = str(note or '')
+        self._persist_review_entry(key_digest, entry)
+
+    def _get_note_for_digest(self, key_digest: Optional[str]) -> str:
+        if not key_digest:
+            return ''
+        entry = self._get_review_entry(key_digest)
+        return str(entry.get('notes') or '')
 
     def _load_oracle_records(self) -> tuple[List[dict], Optional[Path]]:
         chosen = self.run_dir / 'oracle-logs'
@@ -1078,7 +1126,11 @@ class App:
             subj = r.get('query') or r.get('conditional') or r.get('condition') or ''
             r['subject'] = subj
             r['subject_preview'] = self._preview(subj)
-            r['reviewed'] = bool(self.review_state.get(str(r.get('key_digest')), False))
+            kd = str(r.get('key_digest', ''))
+            entry = self._get_review_entry(kd)
+            note_text = str(entry.get('notes') or '')
+            r['reviewed'] = bool(entry.get('reviewed', False))
+            r['notes'] = note_text
         return recs, chosen
 
     # Shared renderer for Oracle record details (used in tab and fullscreen dialog)
@@ -1089,6 +1141,7 @@ class App:
             with ui.column().classes('w-full min-w-0 gap-2'):
                 self._render_oracle_sql_section(rec)
                 self._render_oracle_stacktrace_section(rec)
+                self._render_oracle_notes_section(rec)
                 self._render_oracle_report_section(rec)
                 self._render_oracle_prompt_section(rec)
                 self._render_oracle_stdio_section(rec)
@@ -1145,6 +1198,13 @@ class App:
         with ui.expansion('Stacktrace', icon='troubleshoot', value=True).classes('w-full'):
             ui.codemirror(value=stack_text, line_wrapping=True).classes('w-full stacktrace-cm')
 
+    def _render_oracle_notes_section(self, rec: dict) -> None:
+        kd = str(rec.get('key_digest', ''))
+        current = rec.get('notes') or self._get_note_for_digest(kd)
+        with ui.expansion('Notes', icon='edit_note', value=True).classes('w-full'):
+            textarea = ui.textarea(label='Notes', value=current).props('outlined autogrow').classes('w-full')
+            textarea.on('change', lambda e, kd=kd, rec=rec, ta=textarea: self._on_detail_note_changed(kd, rec, ta.value))
+
     def _render_oracle_report_section(self, rec: dict) -> None:
         report_text = (rec.get('report') or rec.get('last_message'))
         if not report_text:
@@ -1174,6 +1234,11 @@ class App:
             except Exception:
                 # Fallback to plain text if CodeMirror is unavailable
                 self.render_terminal(str(prompt))
+
+    def _on_detail_note_changed(self, key_digest: str, rec: dict, text: Optional[str]) -> None:
+        note = '' if text is None else str(text)
+        rec['notes'] = note
+        self._set_note_for_digest(key_digest, note)
 
     @staticmethod
     def _is_conditional_record(rec: dict) -> bool:
@@ -1360,6 +1425,9 @@ class App:
             ],
             'rowData': records,
             'rowSelection': 'single',
+            'rowClassRules': {
+                'oracle-row-reviewed': 'data.reviewed === true',
+            },
         })
         if dom_id:
             grid.props(f'id={dom_id}')
