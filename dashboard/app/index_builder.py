@@ -22,6 +22,25 @@ INPUT_FILE_GLOB_PATTERNS = [
 EVENT_SHARDS_DIRNAME = "event_shards"
 
 
+def _detect_node_array_column(con: duckdb.DuckDBPyConnection, json_file: str) -> str:
+    """Return the name of the array column that stores execution nodes."""
+    row = con.execute(
+        """
+        SELECT column_name
+        FROM (
+            DESCRIBE SELECT * FROM read_json(?, records=true, filename=true) LIMIT 0
+        )
+        WHERE column_name IN ('nodes', 'aes')
+        ORDER BY CASE column_name WHEN 'nodes' THEN 0 ELSE 1 END
+        LIMIT 1
+        """,
+        [json_file],
+    ).fetchone()
+    if not row:
+        raise RuntimeError(f"{json_file} does not expose 'nodes' or 'aes' arrays")
+    return str(row[0])
+
+
 def _write_events_shard(json_file: str, out_dir: str, memory_limit: Optional[str] = None) -> str:
     """Worker: read one JSON(.gz|.zst) file, transform to event rows, and write a Parquet shard.
     Returns the output shard path.
@@ -44,6 +63,7 @@ def _write_events_shard(json_file: str, out_dir: str, memory_limit: Optional[str
             con.execute("PRAGMA memory_limit=?", [str(memory_limit)])
         # Materialize the transformed rows directly to Parquet
         dest = shard_path.replace("'", "''")
+        node_col = _detect_node_array_column(con, json_file)
         con.execute(
             f"""
             COPY (
@@ -55,8 +75,9 @@ def _write_events_shard(json_file: str, out_dir: str, memory_limit: Optional[str
                         r.runId::BIGINT  AS runId,
                         r.filename::TEXT AS file,
                         i::INTEGER       AS event_idx,
-                        json(list_extract(r.aes, i+1)) AS record
-                    FROM r, range(array_length(r.aes)) AS idx(i)
+                        json(list_extract(r.{node_col}, i+1)) AS record
+                    FROM r, range(array_length(r.{node_col})) AS idx(i)
+                    WHERE r.{node_col} IS NOT NULL
                 )
                 SELECT
                     runId,
@@ -65,7 +86,11 @@ def _write_events_shard(json_file: str, out_dir: str, memory_limit: Optional[str
                     json_extract(record, '$.elem')       AS elem,
                     json_extract_string(elem, '$.$type') AS type,
                     json_extract_string(record, '$.vacuousness')::ENUM ('Vacuous', 'NonVacuous') AS vacuousness,
-                    json_extract_string(record, '$.oracleDigest') AS oracle_digest
+                    json_extract_string(record, '$.relevance') AS relevance,
+                    COALESCE(
+                        json_extract_string(record, '$.oracleDigest'),
+                        json_extract_string(record, '$.oracleDigestOpt')
+                    ) AS oracle_digest
                 FROM exploded
             ) TO '{dest}' (FORMAT PARQUET, COMPRESSION ZSTD)
             """,

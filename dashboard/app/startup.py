@@ -30,6 +30,25 @@ class Verdict(Enum):
     UNKNOWN = 'Unknown'
 
 
+class BranchRelevance(Enum):
+    RELEVANT = 'Relevant'
+    IRRELEVANT = 'Irrelevant'
+    UNKNOWN = 'Unknown'
+
+    @classmethod
+    def from_value(cls, value: object) -> 'BranchRelevance':
+        if isinstance(value, BranchRelevance):
+            return value
+        if value is None:
+            return cls.UNKNOWN
+        text = str(value).strip().lower()
+        if text == 'relevant':
+            return cls.RELEVANT
+        if text == 'irrelevant':
+            return cls.IRRELEVANT
+        return cls.UNKNOWN
+
+
 # ------------------ Data & Indexing ------------------
 # Import index-building utilities; keep MAX_ONE_LINE_SQL_LEN local for UI formatting
 MAX_ONE_LINE_SQL_LEN = 120
@@ -51,6 +70,7 @@ class AppState:
     # Event timeline filters
     show_cond_atoms: bool = True
     show_query_events: bool = True
+    hide_vacuous: bool = False
 
 
 # ------------------ Formatting helpers ------------------
@@ -58,19 +78,17 @@ def _vac_badge(v: str) -> ui.badge:
     match v:
         case 'Vacuous':
             text = 'Vacuous'
-            color = 'grey'
+            return ui.badge(text, color='grey').props('outline dense')
         case 'NonVacuous':
             text = 'NonVacu'
-            color = 'primary'
+            return ui.badge(text, color='primary').props('text-color=white dense')
         case _:
             raise ValueError(f"Unknown vacuousness: {v}")
 
-    return ui.badge(text, color=color).props('outline')
-
 
 def _q_badge(qi: int) -> ui.badge:
-    """Standard Q-badge: white text on purple background, dense."""
-    return ui.badge(f'Q{int(qi)}').props('text-color=white dense')
+    """Standard Q-badge: black text on white background with black border."""
+    return ui.badge(f'Q{int(qi)}').props('dense').classes('bg-white text-black border border-black')
 
 # ------------------ Fragment model & renderers (for QRV tooltips) ------------------
 
@@ -287,6 +305,8 @@ class App:
         self.show_query_checkbox.on_value_change(lambda e: self._on_filter_change(show_query_events=bool(getattr(e, 'value', self.show_query_checkbox.value))))
         self.show_cond_checkbox = ui.switch('Show conditionals', value=self.state.show_cond_atoms)
         self.show_cond_checkbox.on_value_change(lambda e: self._on_filter_change(show_cond_atoms=bool(getattr(e, 'value', self.show_cond_checkbox.value))))
+        self.hide_vacuous_checkbox = ui.switch('Hide vacuous', value=self.state.hide_vacuous)
+        self.hide_vacuous_checkbox.on_value_change(lambda e: self._on_filter_change(hide_vacuous=bool(getattr(e, 'value', self.hide_vacuous_checkbox.value))))
 
         ui.separator()
         sql_input = ui.input('SQL contains', value=self.state.sql_sub)
@@ -461,6 +481,42 @@ class App:
 
     # --- Small helpers ---
     @staticmethod
+    def _row_value(row, key: str):
+        """Best-effort fetch of a key from a pandas Series or dict, None-safe."""
+        if isinstance(row, dict):
+            candidate = row.get(key)
+        else:
+            getter = getattr(row, 'get', None)
+            candidate = None
+            if callable(getter):
+                with suppress(Exception):
+                    candidate = getter(key)
+        if candidate is None:
+            with suppress(Exception):
+                candidate = row[key]
+        if candidate is None:
+            return None
+        try:
+            # Treat pandas NaN/NA as missing
+            if pd.isna(candidate):
+                return None
+        except Exception:
+            pass
+        return candidate
+
+    @staticmethod
+    def _branch_relevance_from_row(row) -> BranchRelevance:
+        return BranchRelevance.from_value(App._row_value(row, 'relevance'))
+
+    @staticmethod
+    def _branch_relevance_badge(relevance: BranchRelevance):
+        if relevance == BranchRelevance.UNKNOWN:
+            return None
+        if relevance == BranchRelevance.RELEVANT:
+            return ui.badge(relevance.value, color='positive').props('text-color=white dense')
+        return ui.badge(relevance.value).props('outline color=negative text-color=negative dense')
+
+    @staticmethod
     def format_sql(text: str) -> str:
         return sqlparse.format(text, reindent=True, keyword_case='upper')
 
@@ -515,6 +571,9 @@ class App:
             timeline_filters_changed = True
         if 'show_query_events' in kwargs:
             self.state.show_query_events = bool(kwargs['show_query_events'])
+            timeline_filters_changed = True
+        if 'hide_vacuous' in kwargs:
+            self.state.hide_vacuous = bool(kwargs['hide_vacuous'])
             timeline_filters_changed = True
 
         if traces_filters_changed:
@@ -775,6 +834,7 @@ class App:
                 row_counters=Counter(),
                 current_query_card=None,
                 current_query_irrelevant_badged=False,
+                current_query_relevance=BranchRelevance.UNKNOWN,
                 pretty_by_qi=pretty_by_qi,
                 oracle_by_digest=oracle_by_digest,
             )
@@ -801,6 +861,9 @@ class App:
                 et = elem['$type']
                 if allowed_types is not None and et not in allowed_types:
                     continue
+                # Apply vacuousness filtering if enabled
+                if self.state.hide_vacuous and r.get('vacuousness') == 'Vacuous':
+                    continue
                 fn = handlers.get(et)
                 if fn is None:
                     raise ValueError(f"Unknown event type: {r['type']}")
@@ -815,6 +878,7 @@ class App:
         row_counters: Counter
         current_query_card: Optional[object]
         current_query_irrelevant_badged: bool
+        current_query_relevance: BranchRelevance
         pretty_by_qi: Dict[int, str]
         oracle_by_digest: Dict[str, dict]
 
@@ -827,7 +891,9 @@ class App:
         except Exception:
             od = None
         rec = ctx.oracle_by_digest.get(od) if od else None
-        ctx.current_query_irrelevant_badged = bool(rec is not None and rec.get('verdict') == Verdict.IRRELEVANT)
+        row_relevance = self._branch_relevance_from_row(r)
+        ctx.current_query_relevance = row_relevance
+        ctx.current_query_irrelevant_badged = row_relevance == BranchRelevance.IRRELEVANT
         card = ui.card().props(f'id=q-{qi}').classes('w-full')
         ctx.current_query_card = card
         with card:
@@ -837,8 +903,13 @@ class App:
                 ui.label(f"[{r['event_idx']}]").classes('text-caption text-grey' + (' self-center' if is_short else ''))
                 with ui.row().classes('items-center gap-2' + (' self-center' if is_short else '')):
                     _q_badge(qi)
+                    relevance_badge = self._branch_relevance_badge(row_relevance)
+                    oracle_click_target = relevance_badge
                     if rec is not None:
-                        badge = self._verdict_badge(rec.get('verdict')).classes('cursor-pointer')
+                        if oracle_click_target is None:
+                            oracle_click_target = ui.button(icon='description').props('flat round dense')
+                        else:
+                            oracle_click_target.classes('cursor-pointer')
                         with ui.dialog() as dlg:
                             dlg.props('maximized no-refocus')
                             with ui.card().classes('w-screen h-screen max-w-none max-h-none p-2 flex flex-col gap-2 overflow-hidden'):
@@ -850,9 +921,11 @@ class App:
                                 with ui.row().classes('justify-end w-full'):
                                     ui.button('Close', on_click=dlg.close).props('flat')
                         try:
-                            badge.on('click', dlg.open)
+                            oracle_click_target.on('click', dlg.open)
                         except Exception:
                             pass
+                    elif oracle_click_target is not None:
+                        oracle_click_target.classes('cursor-default')
                 if is_short:
                     with ui.row().classes('items-center gap-2 min-w-0 self-center'):
                         ui.code(one_line, language='sql').classes('m-0 p-0 whitespace-nowrap min-w-0 self-center flex-1')
@@ -899,6 +972,7 @@ class App:
                 ui.label("(End)")
         ctx.current_query_card = None
         ctx.current_query_irrelevant_badged = False
+        ctx.current_query_relevance = BranchRelevance.UNKNOWN
 
     def _ev_path_cond(self, r, elem, ctx: 'App.QueryContext') -> None:
         if ctx.current_query_card is not None:
@@ -913,12 +987,17 @@ class App:
         with ui.card().classes('w-full'):
             with ui.row().classes('items-start gap-2 w-full'):
                 ui.label(f"[{int(r['event_idx'])}]").classes('text-caption text-grey')
-                is_irrel = bool(rec is not None and rec.get('verdict') == Verdict.IRRELEVANT)
+                rel = self._branch_relevance_from_row(r)
+                relevance_badge = self._branch_relevance_badge(rel)
+                oracle_click_target = relevance_badge
+                is_irrel = rel == BranchRelevance.IRRELEVANT
                 if not is_irrel:
                     _vac_badge(r['vacuousness'])
-                # If we have an oracle record for this condition, show a verdict badge with details dialog
                 if rec is not None:
-                    badge = self._verdict_badge(rec.get('verdict')).classes('cursor-pointer')
+                    if oracle_click_target is None:
+                        oracle_click_target = ui.button(icon='description').props('flat round dense')
+                    else:
+                        oracle_click_target.classes('cursor-pointer')
                     with ui.dialog() as dlg:
                         dlg.props('maximized no-refocus')
                         with ui.card().classes('w-screen h-screen max-w-none max-h-none p-2 flex flex-col gap-2 overflow-hidden'):
@@ -930,9 +1009,11 @@ class App:
                             with ui.row().classes('justify-end w-full'):
                                 ui.button('Close', on_click=dlg.close).props('flat')
                     try:
-                        badge.on('click', dlg.open)
+                        oracle_click_target.on('click', dlg.open)
                     except Exception:
                         pass
+                elif oracle_click_target is not None:
+                    oracle_click_target.classes('cursor-default')
                 frags = term_to_frags(elem["cond"])
                 if elem['outcome'] is False:
                     frags = [{'kind': 'text', 'text': '!'}] + frags
