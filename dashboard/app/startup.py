@@ -175,8 +175,9 @@ def render_frags(frags: List[Frag], *, pretty_by_qi: Dict[int, str], mono: bool 
 
 class App:
     def __init__(self, run_dir: Path) -> None:
-        self.run_dir = run_dir
-        self.data_dir = run_dir / 'annotated-paths'
+        # Always work with an absolute run directory for consistent display/paths
+        self.run_dir = run_dir.resolve()
+        self.data_dir = self.run_dir / 'annotated-paths'
         self.index_path = self.data_dir / 'ap_index.duckdb'
         self.review_state_path = self.run_dir / 'oracle-reviewed.json'
         self.review_state = self._load_review_state()
@@ -349,10 +350,10 @@ class App:
             ui.button(on_click=self._drawer.toggle, icon='menu').props('flat round')
             # Title with data path underneath
             with ui.column().classes('items-start max-w-[70vw]'):
+                ui.label('Run directory').classes('text-white opacity-70 text-caption')
                 _data_path = str(self.run_dir)
-                _path_lbl = ui.label(_data_path).classes('text-white opacity-90 font-mono truncate max-w-full')
-                with _path_lbl:
-                    ui.tooltip(_data_path)
+                _path_lbl = ui.label(_data_path).classes('text-white opacity-90 font-mono text-sm max-w-full')
+                _path_lbl.style('white-space: normal; word-break: break-all;')
             ui.space()
             # Place the main tabs in the header so they appear above the sidebar
             with ui.tabs() as self.main_tabs:
@@ -1228,16 +1229,17 @@ class App:
                 self._render_oracle_stdio_section(rec)
 
     def _render_oracle_meta(self, rec: dict) -> None:
-        with ui.grid().classes('grid-cols-[auto,2fr,1fr,1fr,1fr,1fr] gap-8 w-full min-w-0'):
+        # Give the Key digest column extra room so the value rarely wraps.
+        grid_spec = 'grid-cols-[auto,minmax(320px,4fr),minmax(0,1fr),minmax(0,1fr),minmax(0,1fr),minmax(0,1fr)]'
+        with ui.grid().classes(f'{grid_spec} gap-6 w-full min-w-0 items-start'):
             with ui.column():
                 ui.label('Row ID').classes('text-caption text-grey')
                 ui.label(str(rec.get('row_idx', '—')))
             with ui.column().classes('min-w-0'):
                 ui.label('Key digest').classes('text-caption text-grey')
                 kd_full = str(rec.get('key_digest', '—'))
-                kd_lbl = ui.label(kd_full).classes('font-mono truncate max-w-full')
-                with kd_lbl:
-                    ui.tooltip(kd_full)
+                # Show the full digest inline; prefer single-line display with horizontal scrolling if needed.
+                ui.label(kd_full).classes('font-mono text-body2 max-w-full overflow-x-auto').style('white-space: nowrap; word-break: keep-all;')
             with ui.column():
                 ui.label('Verdict').classes('text-caption text-grey')
                 self._verdict_badge(rec.get('verdict'))
@@ -1484,9 +1486,19 @@ class App:
                     'cellStyle': { 'fontFamily': 'monospace' },
                 },
                 {
+                    'headerName': 'Key digest',
+                    'field': 'key_digest',
+                    'tooltipField': 'key_digest',
+                    'filter': 'agTextColumnFilter',
+                    'floatingFilter': True,
+                    'flex': 1,
+                    'minWidth': 260,
+                    'cellStyle': { 'fontFamily': 'monospace' },
+                },
+                {
                     'headerName': 'Verdict',
                     'field': 'verdict',
-                    'width': 110, 'minWidth': 100,
+                    'width': 95, 'minWidth': 85,
                     'cellClassRules': {
                         'text-positive': "data.verdict === 'Relevant'",
                         'text-negative': "data.verdict === 'Irrelevant'",
@@ -1497,12 +1509,12 @@ class App:
                 {
                     'headerName': 'Duration (s)',
                     'field': 'dur_s',
-                    'width': 110, 'minWidth': 100,
+                    'width': 100, 'minWidth': 85,
                     'type': 'numericColumn',
                     'valueFormatter': 'value != null ? value.toFixed(2) : ""',
                 },
-                {'headerName': 'Tokens', 'field': 'tokens_used', 'width': 140, 'minWidth': 120, 'type': 'numericColumn'},
-                {'headerName': 'Exit', 'field': 'exit_code', 'width': 80, 'minWidth': 70, 'type': 'numericColumn'},
+                {'headerName': 'Tokens', 'field': 'tokens_used', 'width': 115, 'minWidth': 95, 'type': 'numericColumn'},
+                {'headerName': 'Exit', 'field': 'exit_code', 'width': 70, 'minWidth': 60, 'type': 'numericColumn'},
             ],
             'rowData': records,
             'rowSelection': 'single',
