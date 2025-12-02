@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-TEMPFILE="$(mktemp --suffix=.json)"
+TEMPFILE="$(mktemp --suffix=.jsonl)"
 cp /dev/stdin "$TEMPFILE"
 trap '{ rm -f -- "$TEMPFILE"; }' EXIT
 
