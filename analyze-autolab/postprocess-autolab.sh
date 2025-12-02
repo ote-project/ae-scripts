@@ -52,6 +52,11 @@ for p in "$HOME"/dse/logs/autolab-*-"$suffix"; do
      sbt -mem "$MEM_MB" "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ConvertToSqlViews \
                       $config_file $analysis_dir" >/dev/null)
 
+    # If this log directory corresponds to assessments-show, append extra view
+    if [[ "$p" == *assessments-show* ]]; then
+        echo 'SELECT * FROM score_adjustments' >> "$analysis_dir/views-minimized.sql"
+    fi
+
     END=$(date +%s.%N)
     DIFF=$(echo "$END - $START" | bc)
     echo "$DIFF" > "$analysis_dir/post-processing-time-sec.txt"
