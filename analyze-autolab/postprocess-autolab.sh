@@ -54,7 +54,7 @@ for p in "$HOME"/dse/logs/autolab-*-"$suffix"; do
 
     # If this log directory corresponds to assessments-show, append extra view
     if [[ "$p" == *assessments-show* ]]; then
-        echo 'SELECT * FROM score_adjustments' >> "$analysis_dir/views-minimized.sql"
+        echo 'SELECT * FROM score_adjustments;' >> "$analysis_dir/views.sql"
     fi
 
     END=$(date +%s.%N)
