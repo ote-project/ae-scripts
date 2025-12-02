@@ -7,6 +7,8 @@ from typing import Optional
 REWRITES = [
     ("SELECT COUNT(*) FROM `submissions` WHERE `submissions`.`assessment_id` = ? AND `submissions`.`course_user_datum_id` = ?",
      "SELECT `submissions`.`id` FROM `submissions` WHERE `submissions`.`assessment_id` = ? AND `submissions`.`course_user_datum_id` = ?"),
+    ("SELECT COUNT(`submissions`.`id`) FROM `submissions` WHERE `submissions`.`assessment_id` = ? AND `submissions`.`course_user_datum_id` = ?",
+     "SELECT `submissions`.`id` FROM `submissions` WHERE `submissions`.`assessment_id` = ? AND `submissions`.`course_user_datum_id` = ?"),
     ("SELECT COUNT(DISTINCT `watchlist_instances`.`course_user_datum_id`) FROM `watchlist_instances` WHERE `watchlist_instances`.`course_id` = ? AND `watchlist_instances`.`status` = ?",
      "SELECT `watchlist_instances`.`course_user_datum_id` FROM `watchlist_instances` WHERE `watchlist_instances`.`course_id` = ? AND `watchlist_instances`.`status` = ?"),
 ]
