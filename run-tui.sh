@@ -52,9 +52,19 @@ autolab_experiments=(
   "autolab_assessments_viewGradesheet"
   "autolab_submissions_download"
   "autolab_metrics_get_num_pending_instances"
+  "autolab_assessments_show"
 )
 
-apps_selected=$(printf '%s\n' diaspora autolab |
+theodinproject_experiments=(
+  "theodinproject_sitemap_index"
+  "theodinproject_paths_index"
+  "theodinproject_users_show"
+  "theodinproject_project-submissions_index"
+  "theodinproject_courses_show"
+  "theodinproject_lessons_show"
+)
+
+apps_selected=$(printf '%s\n' diaspora autolab theodinproject |
                 gum choose --no-limit --header "Select applications to run")
 
 if [[ -z "$apps_selected" ]]; then
@@ -85,7 +95,7 @@ if [[ "${#experiments[@]}" -eq 0 ]]; then
   echo "Nothing selected – aborting."; exit 0;
 fi
 
-memory=$(gum input --value "20480" \
+memory=$(gum input --value "81920" \
                    --prompt "Maximum heap (MB) ➜ ")
 
 logging=$(printf '%s\n' inputs-only full none |
