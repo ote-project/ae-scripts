@@ -298,7 +298,7 @@ def main() -> None:
     sqls = [s.replace("\n", " ").strip() for s in sqls]  # Make sure each query is on one line.
     sqls = [s for s in sqls if s]  # Remove empty strings.
 
-    if args.optimized or len(sqls) >= 200:
+    if args.optimized or len(sqls) >= 500:
         remove_subsumed_optimized(config, sqls)
     else:
         remove_subsumed_and_print(config, sqls)
