@@ -1,0 +1,9 @@
+nicegui[full]
+duckdb
+numpy
+sqlparse
+tqdm
+PyYAML
+google-cloud-storage
+pandas
+streamlit
