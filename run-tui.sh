@@ -122,5 +122,5 @@ for exp in "${experiments[@]}"; do
     echo "▶︎  Running $exp…"
     sbt -mem "$memory" \
         "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ExploreExecutions \
-               ${conf} ${log} --execution-logging=${logging} ${extra_opts}"
+               ${conf} ${log} --execution-logging=${logging} --silence-path-warnings ${extra_opts}"
 done

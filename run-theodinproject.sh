@@ -22,6 +22,6 @@ for handler in "${HANDLERS[@]}"; do
     "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ExploreExecutions
       ${HOME}/dse/app-config/${APP}_${handler}.conf
       ${HOME}/dse/logs/${APP}-${handler}-${suffix}
-      --execution-logging=inputs-only"
+      --execution-logging=inputs-only --silence-path-warnings"
 done
 
