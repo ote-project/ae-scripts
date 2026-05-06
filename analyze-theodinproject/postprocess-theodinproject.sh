@@ -27,9 +27,9 @@ suffix=${1?param missing - suffix.}
 analysis_id=$(date +"%Y%m%d-%H%M%S")
 
 cd "$HOME/dse"
-(cd examples; git pull --ff-only)
+(cd app-config; git pull --ff-only)
 
-config_file="$HOME/dse/examples/theodinproject_sitemap_index.conf"
+config_file="$HOME/dse/app-config/theodinproject_sitemap_index.conf"
 for p in "$HOME"/dse/logs/theodinproject-*"$suffix"; do
     START=$(date +%s.%N)
 

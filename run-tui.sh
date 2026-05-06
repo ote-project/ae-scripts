@@ -108,7 +108,7 @@ extra_opts=$(gum input --prompt "Extra options for ExploreExecutions (blank = no
 ###############################################################################
 cd "$HOME/dse"
 if [[ "$do_pull" == true ]]; then
-    (cd examples; git pull --ff-only)
+    (cd app-config; git pull --ff-only)
 fi
 
 cd "concolic_driver"
@@ -116,7 +116,7 @@ if [[ "$do_pull" == true ]]; then
     git pull --ff-only
 fi
 for exp in "${experiments[@]}"; do
-    conf="$HOME/dse/examples/${exp}.conf"
+    conf="$HOME/dse/app-config/${exp}.conf"
     log="$HOME/dse/logs/${exp//_/-}-2r-${suffix}"
 
     echo "▶︎  Running $exp…"

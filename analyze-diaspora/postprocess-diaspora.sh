@@ -22,9 +22,9 @@ shift $((OPTIND-1))
 suffix=${1?param missing - suffix.}
 
 cd "$HOME/dse"
-(cd examples; git pull --ff-only)
+(cd app-config; git pull --ff-only)
 
-config_file="$HOME/dse/examples/diaspora_posts_show.conf"
+config_file="$HOME/dse/app-config/diaspora_posts_show.conf"
 for p in $HOME/dse/logs/diaspora-*$suffix; do
     START=$(date +%s.%N)
 

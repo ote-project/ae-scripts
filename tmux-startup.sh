@@ -10,7 +10,7 @@ tmux has-session -t $SESSION 2>/dev/null || \
     -n driver
 
 # Now create the other windows
-tmux new-window -t $SESSION:1 -n config   -c "$HOME/dse/examples"
+tmux new-window -t $SESSION:1 -n config   -c "$HOME/dse/app-config"
 tmux new-window -t $SESSION:2 -n scripts  -c "$HOME/dse/scripts"
 tmux new-window -t $SESSION:3 -n logs     -c "$HOME/dse/logs"
 tmux new-window -t $SESSION:4 -n diaspora -c "$HOME/dse/diaspora"

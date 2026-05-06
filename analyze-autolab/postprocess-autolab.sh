@@ -27,9 +27,9 @@ suffix=${1?param missing - suffix.}
 analysis_id=$(date +"%Y%m%d-%H%M%S")
 
 cd "$HOME/dse"
-(cd examples; git pull --ff-only)
+(cd app-config; git pull --ff-only)
 
-config_file="$HOME/dse/examples/autolab_courses_index.conf"
+config_file="$HOME/dse/app-config/autolab_courses_index.conf"
 for p in "$HOME"/dse/logs/autolab-*-"$suffix"; do
     START=$(date +%s.%N)
 
