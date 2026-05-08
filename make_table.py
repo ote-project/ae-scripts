@@ -2,6 +2,8 @@
 """
 Creates the statistics and performance table in LaTeX.
 """
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 import argparse
 import csv
@@ -14,10 +16,18 @@ import sys
 import textwrap
 from typing import TextIO
 
-from google.cloud import storage
-from google.cloud.storage.bucket import Bucket
 from tqdm import tqdm
 import yaml
+
+# google-cloud-storage is optional — only required for gs:// data sources.
+try:
+    from google.cloud import storage
+    from google.cloud.storage.bucket import Bucket
+    GCLOUD_AVAILABLE = True
+except ImportError:
+    storage = None  # type: ignore[assignment]
+    Bucket = None  # type: ignore[assignment]
+    GCLOUD_AVAILABLE = False
 
 
 @dataclass(frozen=True)
@@ -207,12 +217,12 @@ def find_folder_by_prefix(data_source: DataSource, folder_prefix: str) -> str:
     """
     all_dirs = data_source.list_dirs()
     matching_dirs = [d for d in all_dirs if d.startswith(folder_prefix)]
-    
+
     if len(matching_dirs) == 0:
         raise FileNotFoundError(f"No folder found starting with '{folder_prefix}'")
     if len(matching_dirs) > 1:
         raise ValueError(f"Multiple folders found starting with '{folder_prefix}': {matching_dirs}")
-    
+
     return matching_dirs[0]
 
 
@@ -301,20 +311,24 @@ def format_time_s(seconds: float) -> str:
     return r"\SI{%.1f}{\hour}" % (seconds / 3600)
 
 
-def get_codex_oracle_files(data_source: DataSource, run_folder: str) -> list[str]:
-    """Get the list of codex oracle log files for a run folder. Returns empty list if none found."""
+def get_oracle_files(data_source: DataSource, run_folder: str) -> tuple[list[str], str | None]:
+    """
+    Get oracle log files for a run folder.  Prefers 'match' (mock codex) logs
+    when present; falls back to 'codex' logs.  Returns (files, kind) where
+    kind is 'match', 'codex', or None.
+    """
     logs_prefix = f"{run_folder}/oracle-logs/"
-    oracle_files = [
-        path
-        for path in data_source.list_files(logs_prefix)
-        if Path(path).name.startswith("codex") and path.endswith(".jsonl")
-    ]
-    return oracle_files
+    all_files = data_source.list_files(logs_prefix)
+    for kind in ("match", "codex"):
+        files = [p for p in all_files if Path(p).name.startswith(kind) and p.endswith(".jsonl")]
+        if files:
+            return files, kind
+    return [], None
 
 
 def summarize_oracle_logs(data_source: DataSource, run_folder: str) -> dict | None:
     """Summarize oracle logs for a run folder. Returns None if no logs are found."""
-    oracle_files = get_codex_oracle_files(data_source, run_folder)
+    oracle_files, kind = get_oracle_files(data_source, run_folder)
     if not oracle_files:
         return None
 
@@ -335,9 +349,11 @@ def summarize_oracle_logs(data_source: DataSource, run_folder: str) -> dict | No
                 irrelevant += 1
             else:
                 raise ValueError(f"Unexpected verdict '{verdict}' in {path}")
-            durations.append(float(record["dur_s"]))
+            # match (mock) oracle logs have no dur_s.
+            if "dur_s" in record:
+                durations.append(float(record["dur_s"]))
 
-    if not durations:
+    if relevant + irrelevant == 0:
         return None
 
     timeout_count = 0
@@ -351,10 +367,15 @@ def summarize_oracle_logs(data_source: DataSource, run_folder: str) -> dict | No
         timeout_count = 0
 
     total = relevant + irrelevant + timeout_count
-    mean_dur = statistics.mean(durations)
-    std_dur = statistics.pstdev(durations) if len(durations) > 1 else 0.0
+    if durations:
+        mean_dur = statistics.mean(durations)
+        std_dur = statistics.pstdev(durations) if len(durations) > 1 else 0.0
+    else:
+        mean_dur = None
+        std_dur = None
 
     return {
+        "kind": kind,
         "relevant": relevant,
         "irrelevant": irrelevant,
         "timeout": timeout_count,
@@ -374,9 +395,9 @@ def print_oracle_table_header(f: TextIO, command_line: str, omit_timeout: bool =
         r % duration
         }
         \toprule
-        & \multicolumn{2}{c}{\textbf{Counts}} & \\
+        & \multicolumn{2}{c}{\textbf{Counts}} & \textbf{Duration (min)}\durationmark \\
         \cmidrule(lr){2-3}
-        \textbf{Handler} & Rel. & Irrel. & \textbf{Duration (min)} \\
+        \textbf{Handler} & Rel. & Irrel. & (mean $\pm$ std) \\
         """).strip(), file=f)
     else:
         print(textwrap.dedent(r"""\begin{tabular}{
@@ -387,23 +408,31 @@ def print_oracle_table_header(f: TextIO, command_line: str, omit_timeout: bool =
         r % duration
         }
         \toprule
-        & \multicolumn{3}{c}{\textbf{Counts}} & \\
+        & \multicolumn{3}{c}{\textbf{Counts}} & \textbf{Duration (min)}\durationmark \\
         \cmidrule(lr){2-4}
-        \textbf{Handler} & Rel. & Irrel. & Timeout & \textbf{Duration (min)} \\
+        \textbf{Handler} & Rel. & Irrel. & Timeout & (mean $\pm$ std) \\
         """).strip(), file=f)
 
 
-def format_duration_with_std(mean_seconds: float, std_seconds: float) -> str:
+def format_duration_with_std(mean_seconds: float | None, std_seconds: float | None) -> str:
     """Format duration with standard deviation for the oracle table in minutes: "12.3 ± 0.8"."""
+    if mean_seconds is None:
+        return "---"
     mean_min = mean_seconds / 60
     std_min = std_seconds / 60
     return r"$\num{%.1f} \pm \num{%.1f}$" % (mean_min, std_min)
 
 
-def print_oracle_app(f: TextIO, app: Application, data_source: DataSource, suffix: str, omit_timeout: bool = False) -> bool:
-    """Print oracle statistics for an application. Returns True if any row was printed."""
+def print_oracle_app(f: TextIO, app: Application, data_source: DataSource, suffix: str,
+                     omit_timeout: bool = False) -> tuple[bool, set[str]]:
+    """
+    Print oracle statistics for an application.
+    Returns (rows_printed, kinds_seen) where kinds_seen is the set of oracle
+    kinds ('match' / 'codex') encountered across this app's handlers.
+    """
     rows_printed = False
     printed_header = False
+    kinds_seen: set[str] = set()
     for handler in tqdm(app.handlers, desc=f"Oracle logs of {app.identifier}"):
         folder_prefix = app.run_folder_fmt.format(app=app.identifier, controller=handler.controller,
         action=handler.action, suffix=suffix)
@@ -411,6 +440,7 @@ def print_oracle_app(f: TextIO, app: Application, data_source: DataSource, suffi
         stats = summarize_oracle_logs(data_source, folder)
         if stats is None:
             continue
+        kinds_seen.add(stats["kind"])
 
         if not printed_header:
             if omit_timeout:
@@ -442,7 +472,7 @@ def print_oracle_app(f: TextIO, app: Application, data_source: DataSource, suffi
                     ))
         f.write("\n")
 
-    return rows_printed
+    return rows_printed, kinds_seen
 
 
 def print_oracle_table_footer(f: TextIO) -> None:
@@ -453,12 +483,7 @@ def print_oracle_table_footer(f: TextIO) -> None:
 def print_app(f: TextIO, app: Application, data_source: DataSource, suffix: str, analysis_id: str | None = None) -> int:
     """
     Prints the statistics and performance of an application.
-    :param f: the file to write to
-    :param app: the application
-    :param data_source: the data source (bucket or local directory)
-    :param suffix: the suffix for the application's run
-    :param analysis_id: optional analysis ID to use instead of annotated-paths
-    :return: the number of final views
+    :return: the number of final views.
     """
     policy_folder_prefix = app.policy_folder_fmt.format(app=app.identifier, suffix=suffix)
     policy_folder = find_folder_by_prefix(data_source, policy_folder_prefix)
@@ -469,8 +494,8 @@ def print_app(f: TextIO, app: Application, data_source: DataSource, suffix: str,
     print(r"\textbf{%s} & & & & & & & & & & %s \\" % (app.display_name, format_time_s(final_prune_dur_s)), file=f)
 
     for i, handler in enumerate(tqdm(app.handlers, desc=f"Handlers of {app.identifier}")):
-        folder_prefix = app.run_folder_fmt.format(app=app.identifier, controller=handler.controller, action=handler.action,
-                                                  suffix=suffix)
+        folder_prefix = app.run_folder_fmt.format(app=app.identifier, controller=handler.controller,
+                                                  action=handler.action, suffix=suffix)
         folder = find_folder_by_prefix(data_source, folder_prefix)
         analysis_path = get_analysis_path(data_source, folder, analysis_id)
 
@@ -492,7 +517,8 @@ def print_app(f: TextIO, app: Application, data_source: DataSource, suffix: str,
         simplify_dur_s = read_float(data_source, f"{analysis_path}/post-processing-time-sec.txt")
         prune_dur_s = read_float(data_source, f"{analysis_path}/remove-subsumed-time-sec.txt")
 
-        prune_suffix = r" \prune{}" if get_codex_oracle_files(data_source, folder) else ""
+        oracle_files, _ = get_oracle_files(data_source, folder)
+        prune_suffix = r" \prune{}" if oracle_files else ""
         f.write(r"\quad\texttt{%s}%s & \num{%d} & \num{%d} & $\to$ & \num{%d} & \num{%d} &" %
                 (handler.display_name, prune_suffix, num_paths, num_cqs_start, num_cqs_end, num_minimized_views))
         if i == 0:
@@ -531,7 +557,8 @@ def main() -> None:
 
     # Determine if data_source is a local directory or a bucket name
     if args.data_source.startswith("gs://"):
-        # Google Cloud Storage bucket
+        if not GCLOUD_AVAILABLE:
+            parser.error("gs:// data sources require the google-cloud-storage package, which is not installed.")
         bucket_name = args.data_source[5:]  # Remove "gs://" prefix
         if not bucket_name:
             parser.error("Bucket name cannot be empty after 'gs://' prefix.")
@@ -557,10 +584,12 @@ def main() -> None:
     with (args.output_dir / "relevance-table.tex").open("w") as f:
         print_oracle_table_header(f, command_line=" ".join(sys.argv), omit_timeout=args.omit_oracle_timeout)
         any_rows = False
+        oracle_kinds: set[str] = set()
         for app in tqdm(APPS, desc="Oracle applications"):
             suffix = args.suffixes[app.identifier]
-            printed = print_oracle_app(f, app, data_source, suffix, omit_timeout=args.omit_oracle_timeout)
+            printed, kinds = print_oracle_app(f, app, data_source, suffix, omit_timeout=args.omit_oracle_timeout)
             any_rows = any_rows or printed
+            oracle_kinds.update(kinds)
         if not any_rows:
             print(r"% No oracle logs found; table is empty.", file=f)
         print_oracle_table_footer(f)
@@ -569,6 +598,13 @@ def main() -> None:
         # Define some macros for the final-view counts.
         for app, num_final_views in app2num_final_views.items():
             print(r"\newcommand{\%sFinalViews}{\num{%d}\xspace}" % (app.identifier, num_final_views), file=f)
+
+        # Macro indicating which oracle kind was used for the relevance stats.
+        if len(oracle_kinds) == 1:
+            kind = next(iter(oracle_kinds))
+            print(r"\newcommand{\OracleKind}{%s}" % kind, file=f)
+        elif len(oracle_kinds) > 1:
+            raise ValueError(f"Mixed oracle kinds across apps: {sorted(oracle_kinds)}")
 
 
 if __name__ == "__main__":

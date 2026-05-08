@@ -3,9 +3,10 @@ set -ex
 
 # Default memory for sbt (in MB)
 MEM_MB=102400
+analysis_id=""
 
-# Parse options: allow optional -m <MB>
-while getopts ":m:" opt; do
+# Parse options: allow optional -m <MB> and -a <ANALYSIS_ID>
+while getopts ":m:a:" opt; do
   case $opt in
     m)
       if ! [[ "$OPTARG" =~ ^[0-9]+$ ]]; then
@@ -14,8 +15,11 @@ while getopts ":m:" opt; do
       fi
       MEM_MB="$OPTARG"
       ;;
+    a)
+      analysis_id="$OPTARG"
+      ;;
     \?)
-      echo "Usage: $(basename "$0") [-m MEM_MB] suffix" >&2
+      echo "Usage: $(basename "$0") [-m MEM_MB] [-a ANALYSIS_ID] suffix" >&2
       exit 1
       ;;
   esac
@@ -24,7 +28,7 @@ done
 shift $((OPTIND-1))
 
 suffix=${1?param missing - suffix.}
-analysis_id=$(date +"%Y%m%d-%H%M%S")
+[[ -z "$analysis_id" ]] && analysis_id=$(date +"%Y%m%d-%H%M%S")
 
 cd "$HOME/dse"
 (cd app-config; git pull --ff-only)
@@ -34,6 +38,10 @@ for p in "$HOME"/dse/logs/theodinproject-*"$suffix"; do
     START=$(date +%s.%N)
 
     analysis_dir="$p/analysis-$analysis_id"
+    if [[ -e "$analysis_dir" ]]; then
+        echo "Error: $analysis_dir already exists." >&2
+        exit 1
+    fi
     rm -f "$analysis_dir/original-conditioned-queries.json"
     (cd "$HOME/dse/concolic_driver";
      sbt -mem "$MEM_MB" "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.GenerateConditionedQueries \

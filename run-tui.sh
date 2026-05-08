@@ -33,36 +33,11 @@ done
 command -v gum >/dev/null ||
     { echo "❌  Please install 'gum' first."; exit 1; }
 
+source "$(dirname "${BASH_SOURCE[0]}")/_run-lib.sh"
+
 suffix=$(gum input --value "$(date +%Y%m%d-%H%M%S)" \
                    --prompt "Suffix for log-files ➜ ")
 [[ -z "$suffix" ]] && { echo "❌  Suffix cannot be empty."; exit 1; }
-
-diaspora_experiments=(
-  "diaspora_comments_index"
-  "diaspora_conversations_index"
-  "diaspora_notifications_index"
-  "diaspora_people_show"
-  "diaspora_posts_show"
-  "diaspora_people_stream"
-)
-
-autolab_experiments=(
-  "autolab_courses_index"
-  "autolab_assessments_index"
-  "autolab_assessments_viewGradesheet"
-  "autolab_submissions_download"
-  "autolab_metrics_get_num_pending_instances"
-  "autolab_assessments_show"
-)
-
-theodinproject_experiments=(
-  "theodinproject_sitemap_index"
-  "theodinproject_paths_index"
-  "theodinproject_users_show"
-  "theodinproject_project-submissions_index"
-  "theodinproject_courses_show"
-  "theodinproject_lessons_show"
-)
 
 apps_selected=$(printf '%s\n' diaspora autolab theodinproject |
                 gum choose --no-limit --header "Select applications to run")
@@ -106,21 +81,4 @@ extra_opts=$(gum input --prompt "Extra options for ExploreExecutions (blank = no
 ###############################################################################
 # ──  Run experiments  ────────────────────────────────────────────────────────
 ###############################################################################
-cd "$HOME/dse"
-if [[ "$do_pull" == true ]]; then
-    (cd app-config; git pull --ff-only)
-fi
-
-cd "concolic_driver"
-if [[ "$do_pull" == true ]]; then
-    git pull --ff-only
-fi
-for exp in "${experiments[@]}"; do
-    conf="$HOME/dse/app-config/${exp}.conf"
-    log="$HOME/dse/logs/${exp//_/-}-2r-${suffix}"
-
-    echo "▶︎  Running $exp…"
-    sbt -mem "$memory" \
-        "runMain edu.berkeley.cs.netsys.policy_extraction.cmdline.ExploreExecutions \
-               ${conf} ${log} --execution-logging=${logging} --silence-path-warnings ${extra_opts}"
-done
+run_experiments
