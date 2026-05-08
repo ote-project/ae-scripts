@@ -9,8 +9,7 @@ Here are the most important files in this repository:
 
 ```
 scripts/
-├── run-tui.sh                  # Interactive launcher for experiments (main entry point)
-├── run-{autolab,diaspora,theodinproject}.sh
+├── run-ae.sh                   # Experiment runner (main entry point)
 ├── analyze-autolab/            # Post-processing pipeline for Autolab
 ├── analyze-diaspora/           # Post-processing pipeline for Diaspora
 ├── analyze-theodinproject/     # Post-processing pipeline for The Odin Project
