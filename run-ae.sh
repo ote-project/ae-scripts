@@ -73,11 +73,16 @@ fi
 
 scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Pull the scripts repo so make_table.py, make_ae_pdf.sh, and the analyze-*
-# helpers run the latest code.  Changes to run-ae.sh itself take effect on
-# the next invocation, since this script is already in flight.
+# Pull every git repo under ~/dse/ so make_table.py, make_ae_pdf.sh, the
+# analyze-* helpers, and the apps under test all run the latest code.
+# Changes to run-ae.sh itself take effect on the next invocation, since
+# this script is already in flight.
 if [[ "$do_pull" == true ]]; then
-    (cd "$scripts_dir" && git pull --ff-only)
+    for repo in "$HOME/dse"/*/; do
+        [[ -d "$repo/.git" ]] || continue
+        echo "Pulling: $repo" >&2
+        (cd "$repo" && git pull --ff-only)
+    done
 fi
 
 source "$scripts_dir/_run-lib.sh"
